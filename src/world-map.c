@@ -263,19 +263,14 @@ static void draw_grid(canvas_cell *cells, int w, int h, const theme *th)
     }
 }
 
-/* Build a target_size-index lookup table by sampling source cells at each
- * target cell center.
+/* Fill out[0 .. count-1] with the source index each destination cell samples,
+ * taken at the cell center and clamped to [0, range).
  */
-static void scaled_indices(int *out, int source_size, int target_size)
+static void scaled_indices(int *out, int count, int range)
 {
-    for (int i = 0; i < source_size; i++) {
-        double t = ((double) i + 0.5) / (double) source_size;
-        int v = (int) (t * (double) target_size);
-        if (v < 0)
-            v = 0;
-        if (v >= target_size)
-            v = target_size - 1;
-        out[i] = v;
+    for (int i = 0; i < count; i++) {
+        double t = ((double) i + 0.5) / (double) count;
+        out[i] = geotrace_clamp_int((int) (t * (double) range), 0, range - 1);
     }
 }
 
@@ -455,6 +450,14 @@ static const double GEOTRACE_PI = 3.14159265358979323846;
 #define TRAJ_SHIMMER_AMP (TRAJ_SHIMMER_AMP_PERMILLE / 1000.0)
 #define TRAJ_DROP_CUTOFF (TRAJ_DROP_CUTOFF_PERMILLE / 1000.0f)
 
+/* Intensity at which a body cell renders bold, and the margin a rival route
+ * must beat to take a cell that another route already owns. Named for the same
+ * reason as the constants above: they are render-tuning knobs, and the last
+ * ones left as bare literals in the middle of the code.
+ */
+#define TRAJ_BOLD_CUTOFF 0.56f
+#define TRAJ_OWNER_STEAL_MARGIN 0.02f
+
 _Static_assert((long) WORLD_TRAJECTORY_MIN_FADE_PERMILLE
                        *TRAJ_TAIL_FLOOR_PERMILLE *(TRAJ_SHIMMER_BASE_PERMILLE -
                                                    TRAJ_SHIMMER_AMP_PERMILLE) >
@@ -592,7 +595,8 @@ static void plot_dot(traj_cell *layer,
     if (intensity > 1.0f)
         intensity = 1.0f;
     if (layer[idx].owner != 0 && layer[idx].owner != route_id) {
-        bool replace = edge || intensity > layer[idx].intensity + 0.02f;
+        bool replace =
+            edge || intensity > layer[idx].intensity + TRAJ_OWNER_STEAL_MARGIN;
         if (!replace)
             return;
         layer[idx].pattern = 0;
@@ -758,7 +762,8 @@ static void composite_trajectory_layer(canvas_cell *cells,
 
         cells[idx].codepoint = WORLD_BRAILLE_BASE + layer[idx].pattern;
         cells[idx].fg_rgb = trajectory_color(th, intensity, edge);
-        cells[idx].flags = (edge || intensity >= 0.56f) ? CELL_FLAG_BOLD : 0;
+        cells[idx].flags =
+            (edge || intensity >= TRAJ_BOLD_CUTOFF) ? CELL_FLAG_BOLD : 0;
     }
 }
 
