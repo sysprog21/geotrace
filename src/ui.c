@@ -738,9 +738,12 @@ void ui_run(struct ui_context *ui, geotrace_flag *stop, geotrace_flag *resize)
 
     enter_raw_mode();
 
-    long frame_ns = 1000000000L / ui->fps;
+    const int64_t frame_ns = 1000000000 / ui->fps;
 
     while (!geotrace_flag_is_raised(stop)) {
+        struct timespec frame_start;
+        clock_gettime(CLOCK_MONOTONIC, &frame_start);
+
         if (geotrace_flag_take(resize))
             world_invalidate_cache();
 
@@ -761,8 +764,23 @@ void ui_run(struct ui_context *ui, geotrace_flag *stop, geotrace_flag *resize)
         if (!render_frame(ui))
             break;
 
-        struct timespec ts = {.tv_sec = 0, .tv_nsec = frame_ns};
-        nanosleep(&ts, NULL);
+        /* Sleep the remainder of the frame, not a whole frame on top of the
+         * work: composing and flushing a full-screen frame is a real fraction
+         * of the budget, so sleeping frame_ns unconditionally put the actual
+         * rate below the requested one, by more the bigger the terminal.
+         */
+        int64_t remain_ns = frame_ns - geotrace_elapsed_ns_now(frame_start);
+        if (remain_ns > 0) {
+            /* Split rather than stuffing everything into tv_nsec: at --fps=1 a
+             * frame is exactly 1e9 ns, and nanosleep rejects tv_nsec == 1e9
+             * with EINVAL, so that frame would never sleep at all.
+             */
+            struct timespec ts = {
+                .tv_sec = (time_t) (remain_ns / 1000000000),
+                .tv_nsec = (long) (remain_ns % 1000000000),
+            };
+            nanosleep(&ts, NULL);
+        }
     }
 
     restore_terminal();
