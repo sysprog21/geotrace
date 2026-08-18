@@ -394,25 +394,95 @@ static ssize_t send_all(int fd, const char *buf, size_t len)
     return (ssize_t) sent;
 }
 
-/* Read up to GEO_RESPONSE_MAX-1 bytes; NUL-terminate.
- * Returns bytes read, or -1 on error.
+/* Read the complete response into buf (NUL-terminated).
+ * Returns bytes read, or -1 on error, timeout, or truncation.
+ *
+ * budget_ms bounds the whole read, not each recv. SO_RCVTIMEO only bounds one
+ * call, so a peer trickling a byte per timeout could otherwise hold the single
+ * resolver thread for cap * timeout_ms (hours at the default), during which no
+ * geo lookups happen at all. The transport is plaintext HTTP, so that peer need
+ * not be ip-api.com.
+ *
+ * Success requires the peer's EOF. The request says "Connection: close", so a
+ * complete response always ends in one; anything shorter is a prefix, and
+ * parsing a prefix would cache a half-read country name (or a body cut short
+ * before the field that would have made it a miss) as if it were
+ * authoritative. Reporting -1 sends those to the transient path, where they
+ * are retried rather than remembered.
  */
-static ssize_t recv_response(int fd, char *buf, size_t cap)
+static ssize_t recv_response(int fd, char *buf, size_t cap, int budget_ms)
 {
     if (!buf || cap == 0)
         return -1;
+    /* FD_SET past FD_SETSIZE writes off the end of fd_set. dial_one already
+     * refuses such a descriptor, but the check belongs here too now that this
+     * function does its own FD_SET rather than inheriting the caller's
+     * guarantee.
+     */
+    if (fd < 0 || fd >= FD_SETSIZE)
+        return -1;
+
+    /* No clock means no budget, and a read with no budget is the unbounded
+     * wait this function exists to prevent.
+     */
+    struct timespec start;
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0)
+        return -1;
+
     size_t total = 0;
+    bool complete = false;
     while (total + 1 < cap) {
-        ssize_t n = recv(fd, buf + total, cap - 1 - total, 0);
-        if (n == 0)
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+            return -1;
+        int64_t remaining_ns =
+            (int64_t) budget_ms * 1000000 - geotrace_elapsed_ns(start, now);
+        if (remaining_ns <= 0)
             break;
-        if (n < 0) {
+
+        fd_set rset;
+        FD_ZERO(&rset);
+        FD_SET(fd, &rset);
+        /* Round up so a sub-microsecond remainder cannot produce a zero
+         * timeout, which select() reads as "poll and return immediately" and
+         * would spin. The casts are explicit because time_t and suseconds_t are
+         * 32-bit on 32-bit Linux, where the implicit narrowing would trip
+         * -Wconversion; the values are bounded by budget_ms.
+         */
+        int64_t remaining_us = (remaining_ns + 999) / 1000;
+        struct timeval tv = {
+            .tv_sec = (time_t) (remaining_us / 1000000),
+            .tv_usec = (suseconds_t) (remaining_us % 1000000),
+        };
+        int ready = select(fd + 1, &rset, NULL, NULL, &tv);
+        if (ready == 0)
+            break;
+        if (ready < 0) {
             if (errno == EINTR)
+                continue;
+            return -1;
+        }
+
+        /* MSG_DONTWAIT because a readable indication does not guarantee the
+         * recv completes: on a spurious wakeup the blocking call would park
+         * for a whole SO_RCVTIMEO past the budget. EAGAIN just sends us back
+         * to the deadline check.
+         */
+        ssize_t n = recv(fd, buf + total, cap - 1 - total, MSG_DONTWAIT);
+        if (n == 0) {
+            complete = true;
+            break;
+        }
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
                 continue;
             return -1;
         }
         total += (size_t) n;
     }
+
+    if (!complete)
+        return -1; /* budget expired, or the response outgrew the buffer */
     buf[total] = '\0';
     return (ssize_t) total;
 }
@@ -610,6 +680,31 @@ static geo_http_result auth_miss(geo_result *out)
     return GEO_HTTP_MISS;
 }
 
+/* Map an HTTP status to a cache decision, without touching a socket so the
+ * policy is directly testable.
+ *
+ * GEO_HTTP_OK means "status is fine, keep parsing the body"; it is not yet a
+ * result. Every other return is final.
+ */
+static geo_http_result classify_status(int status, geo_result *out)
+{
+    if (status < 0)
+        return GEO_HTTP_TRANSIENT;
+
+    /* 429 earns a cooldown. 5xx is transient. 4xx is an authoritative miss: no
+     * retry of the same IP will satisfy a 400/404 from ip-api.
+     */
+    if (status == 429)
+        return GEO_HTTP_RATE_LIMITED;
+    if (status >= 500)
+        return GEO_HTTP_TRANSIENT;
+    if (status >= 400)
+        return auth_miss(out);
+    if (status != 200)
+        return GEO_HTTP_TRANSIENT;
+    return GEO_HTTP_OK;
+}
+
 static geo_http_result http_lookup(const char *path,
                                    geo_result *out,
                                    int timeout_ms,
@@ -628,27 +723,14 @@ static geo_http_result http_lookup(const char *path,
     }
 
     char buf[GEO_RESPONSE_MAX];
-    ssize_t n = recv_response(fd, buf, sizeof(buf));
+    ssize_t n = recv_response(fd, buf, sizeof(buf), timeout_ms);
     close(fd);
     if (n <= 0)
         return GEO_HTTP_TRANSIENT;
 
-    int status = parse_status_code(buf);
-    if (status < 0)
-        return GEO_HTTP_TRANSIENT;
-
-    /* 429 earns a cooldown. Other 5xx are transient. 4xx is an authoritative
-     * miss: no IP will ever satisfy a 400/404 from ip-api.
-     */
-    if (status == 429)
-        return GEO_HTTP_RATE_LIMITED;
-    if (status >= 500)
-        return GEO_HTTP_TRANSIENT;
-    if (status >= 400)
-        return auth_miss(out);
-    if (status != 200)
-        return GEO_HTTP_TRANSIENT;
-
+    geo_http_result cls = classify_status(parse_status_code(buf), out);
+    if (cls != GEO_HTTP_OK)
+        return cls;
 
     const char *body = find_body(buf);
     if (!body)

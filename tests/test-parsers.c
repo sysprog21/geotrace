@@ -125,6 +125,56 @@ static void test_parse_status_code(void)
     expect_status("HTTP/1.1 -12 OK", -1);
 }
 
+/* classify_status */
+
+static void expect_class(int status, geo_http_result want, bool want_sentinel)
+{
+    /* Poison the result so an authoritative miss has to zero it itself. */
+    geo_result r;
+    memset(&r, 0xAA, sizeof(r));
+
+    geo_http_result got = classify_status(status, &r);
+    if (got != want) {
+        fprintf(stderr, "FAIL classify_status(%d) = %d, want %d\n", status,
+                (int) got, (int) want);
+        exit(1);
+    }
+    geo_result zeroed;
+    memset(&zeroed, 0, sizeof(zeroed));
+    if (want_sentinel && memcmp(&r, &zeroed, sizeof(r)) != 0) {
+        /* Compare every byte, not just the fields a caller happens to read:
+         * stale coordinates left behind by a partial reset would be cached as
+         * an authoritative miss.
+         */
+        fprintf(stderr, "FAIL classify_status(%d): result not zeroed\n",
+                status);
+        exit(1);
+    }
+}
+
+static void test_classify_status(void)
+{
+    /* 200 means "keep parsing"; the body decides. */
+    expect_class(200, GEO_HTTP_OK, false);
+
+    /* 429 is the one status that arms the cooldown. */
+    expect_class(429, GEO_HTTP_RATE_LIMITED, false);
+
+    /* 4xx is authoritative: retrying the same IP cannot help, so it caches as
+     * the zeroed sentinel.
+     */
+    expect_class(400, GEO_HTTP_MISS, true);
+    expect_class(404, GEO_HTTP_MISS, true);
+    expect_class(418, GEO_HTTP_MISS, true);
+
+    /* 5xx and anything unclassifiable are retried later, never cached. */
+    expect_class(500, GEO_HTTP_TRANSIENT, false);
+    expect_class(503, GEO_HTTP_TRANSIENT, false);
+    expect_class(301, GEO_HTTP_TRANSIENT, false);
+    expect_class(100, GEO_HTTP_TRANSIENT, false);
+    expect_class(-1, GEO_HTTP_TRANSIENT, false); /* parse_status_code failed */
+}
+
 /* cli_normalize_interfaces */
 
 static void test_normalize_interfaces(void)
@@ -197,12 +247,109 @@ static void test_row_parsers(void)
 #endif
 }
 
+/* recv_response budget */
+
+/* The window between the two is the whole test: a reader that honours the
+ * budget returns at ~BUDGET, one that does not returns when the peer closes at
+ * CLOSE. The bound below sits between them with an order of magnitude of slack
+ * on each side, so a loaded runner cannot turn either case into the other.
+ */
+#define TRICKLE_BUDGET_MS 50
+#define TRICKLE_CLOSE_MS 1000
+#define TRICKLE_MAX_WAIT_MS (TRICKLE_CLOSE_MS / 2)
+
+/* Send one byte, then hold the connection open well past the reader's budget.
+ * The hold is what makes the test meaningful: if the reader closes at
+ * TRICKLE_CLOSE_MS instead, a reader with no budget at all still returns one
+ * byte, just later, and the byte count alone cannot tell the two apart.
+ */
+static void *trickle_writer(void *arg)
+{
+    int fd = *(int *) arg;
+    char byte = 'x';
+    assert(send(fd, &byte, 1, 0) == 1);
+    /* Split the sleep: at 1000 ms the whole value lands on tv_nsec as 1e9,
+     * which nanosleep rejects with EINVAL, and the writer would then close
+     * immediately and hand the reader the EOF this test exists to withhold.
+     */
+    struct timespec delay = {
+        .tv_sec = TRICKLE_CLOSE_MS / 1000,
+        .tv_nsec = (TRICKLE_CLOSE_MS % 1000) * 1000000L,
+    };
+    nanosleep(&delay, NULL);
+    close(fd);
+    return NULL;
+}
+
+/* Send a whole "response" and close, which is what ip-api does for a request
+ * carrying "Connection: close".
+ */
+static void *complete_writer(void *arg)
+{
+    int fd = *(int *) arg;
+    assert(send(fd, "hello", 5, 0) == 5);
+    close(fd);
+    return NULL;
+}
+
+static void test_recv_response_timeout(void)
+{
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    pthread_t tid;
+    assert(pthread_create(&tid, NULL, trickle_writer, &fds[1]) == 0);
+
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    char buf[16];
+    ssize_t n = recv_response(fds[0], buf, sizeof(buf), TRICKLE_BUDGET_MS);
+    long elapsed_ms = (long) (geotrace_elapsed_ns_now(start) / 1000000);
+
+    /* A prefix is a failure, not a short read: the caller must not parse a
+     * response the peer never finished sending.
+     */
+    assert(n == -1);
+    if (elapsed_ms < TRICKLE_BUDGET_MS / 2 ||
+        elapsed_ms > TRICKLE_MAX_WAIT_MS) {
+        fprintf(stderr,
+                "FAIL recv_response returned after %ld ms, want ~%d "
+                "(budget) and at most %d (well before the %d peer close)\n",
+                elapsed_ms, TRICKLE_BUDGET_MS, TRICKLE_MAX_WAIT_MS,
+                TRICKLE_CLOSE_MS);
+        exit(1);
+    }
+
+    close(fds[0]);
+    assert(pthread_join(tid, NULL) == 0);
+}
+
+static void test_recv_response_complete(void)
+{
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    pthread_t tid;
+    assert(pthread_create(&tid, NULL, complete_writer, &fds[1]) == 0);
+
+    char buf[16];
+    ssize_t n = recv_response(fds[0], buf, sizeof(buf), 2000);
+    assert(n == 5);
+    assert(strcmp(buf, "hello") == 0);
+
+    close(fds[0]);
+    assert(pthread_join(tid, NULL) == 0);
+}
+
 int main(void)
 {
     test_json_get_string();
     test_parse_status_code();
+    test_classify_status();
     test_normalize_interfaces();
     test_row_parsers();
+    test_recv_response_timeout();
+    test_recv_response_complete();
     fprintf(stderr, "parser tests passed\n");
     return 0;
 }
