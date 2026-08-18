@@ -65,11 +65,9 @@ bool platform_iface_append(char names[][GEOTRACE_IFACE_LEN],
                            size_t max,
                            const char *name)
 {
-    if (!names || !count || !name || !*name || *count > max)
+    if (!names || !count || !name || !*name || *count >= max)
         return false;
     if (is_loopback(name))
-        return false;
-    if (*count >= max)
         return false;
     if (strlen(name) >= GEOTRACE_IFACE_LEN)
         return false;
