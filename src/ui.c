@@ -197,8 +197,7 @@ struct ui_context {
 
 static double elapsed_seconds(struct timespec start, struct timespec now)
 {
-    return (double) (now.tv_sec - start.tv_sec) +
-           (double) (now.tv_nsec - start.tv_nsec) / 1e9;
+    return (double) geotrace_elapsed_ns(start, now) / 1e9;
 }
 
 static double timespec_seconds(struct timespec ts)

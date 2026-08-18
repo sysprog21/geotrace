@@ -252,8 +252,32 @@ static void test_mpsc_stress(void)
     ring_destroy(r);
 }
 
+/* geotrace_elapsed_ns backs the frame pacer, the socket read budget, and marker
+ * ages. The failure mode is silent (a negative or wildly wrong delta, then a
+ * frame that never sleeps or a read that never times out), and the two ways to
+ * get it wrong are the nanosecond borrow and 32-bit overflow.
+ */
+static void test_elapsed_ns(void)
+{
+    struct timespec a = {100, 0};
+    struct timespec b = {100, 250};
+    assert(geotrace_elapsed_ns(a, b) == 250);
+    assert(geotrace_elapsed_ns(b, a) == -250);
+
+    /* Borrow across the second boundary. */
+    struct timespec c = {101, 1};
+    struct timespec d = {102, 0};
+    assert(geotrace_elapsed_ns(c, d) == 999999999);
+
+    /* Deltas past 2.1 s, where a 32-bit nanosecond count would wrap. */
+    struct timespec e = {0, 0};
+    struct timespec f = {10, 500000000};
+    assert(geotrace_elapsed_ns(e, f) == 10500000000LL);
+}
+
 int main(void)
 {
+    test_elapsed_ns();
     test_empty_take_returns_after_shutdown();
     test_fill_then_drain();
     test_wrap_around();
