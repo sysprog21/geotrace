@@ -341,6 +341,28 @@ static void test_recv_response_complete(void)
     assert(pthread_join(tid, NULL) == 0);
 }
 
+/* A lookup that never reached the network must leave the cache alone. This
+ * test lives here rather than in test-resolver.c because the count is private
+ * to geo.c, and counting is the only way to see the difference: a wrongly
+ * cached transient looks exactly like an authoritative miss from outside.
+ */
+static void test_cache_only_miss_is_not_cached(void)
+{
+    struct geo_cache *c = geo_cache_create(16);
+    geo_result r;
+    memset(&r, 0xAA, sizeof(r)); /* a caller that did not zero its result */
+
+    /* timeout_ms == 0: http_lookup returns transient without a socket. */
+    assert(!geo_lookup(c, htonl(0x08080808u), 0, &r));
+    assert(!r.valid);
+    if (c->count != 0) {
+        fprintf(stderr, "FAIL cache-only miss stored %zu entries\n", c->count);
+        exit(1);
+    }
+
+    geo_cache_destroy(c);
+}
+
 int main(void)
 {
     test_json_get_string();
@@ -350,6 +372,7 @@ int main(void)
     test_row_parsers();
     test_recv_response_timeout();
     test_recv_response_complete();
+    test_cache_only_miss_is_not_cached();
     fprintf(stderr, "parser tests passed\n");
     return 0;
 }

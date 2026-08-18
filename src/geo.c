@@ -126,6 +126,14 @@ struct geo_cache {
  */
 #define GEO_RATE_LIMIT_QUIET_S 60
 
+/* Shorter cooldown for connect/timeout failures. Without it a down network
+ * costs the full per-request timeout on every uncached IP, and the single
+ * resolver thread falls permanently behind a packet ring it can never drain.
+ * Short enough that a brief blip barely shows, long enough that a sustained
+ * outage costs one request per interval instead of one per packet.
+ */
+#define GEO_TRANSIENT_QUIET_S 5
+
 #define GEO_CACHE_LOAD_NUM 7 /* resize when count * 10 >= capacity * 7 */
 #define GEO_CACHE_LOAD_DEN 10
 #define GEO_CACHE_MIN_CAP 16
@@ -810,13 +818,36 @@ bool geo_lookup(struct geo_cache *c,
              "/json/%s?fields=status,country,city,lat,lon,query", ip_str);
 
     geo_http_result rc = http_lookup(path, out, timeout_ms, ip_str);
-    if (rc == GEO_HTTP_RATE_LIMITED) {
-        pthread_mutex_lock(&c->mtx);
-        c->quiet_until = now.tv_sec + GEO_RATE_LIMIT_QUIET_S;
-        pthread_mutex_unlock(&c->mtx);
-    }
-    if (rc < 0) { /* rate-limited or transient: either way, do not cache */
+    if (rc < 0) {
+        /* Not an answer about this IP, so nothing is cached. This has to come
+         * before the cooldown decision: http_lookup returns transient without
+         * touching out when it never opened a socket, so falling through to
+         * the caching path below would store whatever the caller happened to
+         * pass in as though the service had confirmed it.
+         */
         memset(out, 0, sizeof(*out));
+
+        /* Arm the cooldown only when a request was actually attempted. A
+         * cache-only caller (timeout_ms == 0, which is what demo mode and the
+         * tests use) is told transient without a socket ever being opened, and
+         * a cooldown for that would report a service problem no one observed.
+         */
+        if (timeout_ms > 0) {
+            /* Length matched to how long the condition usually lasts: a minute
+             * for the rate-limit window, seconds for an unreachable service.
+             * Timed from now rather than from the pre-request reading, since
+             * the attempt itself can burn most of it.
+             */
+            time_t quiet = rc == GEO_HTTP_RATE_LIMITED ? GEO_RATE_LIMIT_QUIET_S
+                                                       : GEO_TRANSIENT_QUIET_S;
+            struct timespec after;
+            if (clock_gettime(CLOCK_MONOTONIC, &after) != 0)
+                after = now;
+
+            pthread_mutex_lock(&c->mtx);
+            c->quiet_until = after.tv_sec + quiet;
+            pthread_mutex_unlock(&c->mtx);
+        }
         return false;
     }
 
