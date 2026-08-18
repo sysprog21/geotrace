@@ -363,6 +363,70 @@ static const char *const SUDO_CANDIDATES[] = {
     NULL,
 };
 
+/* True when the caller supplied a privilege-drop flag of their own, in either
+ * spelling ("--drop-uid=N" or "--drop-uid N").
+ *
+ * These decide who the UI runs as, so the value has to be the one this process
+ * computed from getuid(). Refusing a caller-supplied one is what makes that
+ * unconditional. Ordering cannot: placing the generated flags last so getopt's
+ * last-occurrence rule favours them means appending them after anything the
+ * caller wrote, including an argument that is not an option at all.
+ */
+static bool has_caller_drop_flag(int argc, char **argv)
+{
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--drop-uid", 10) == 0 ||
+            strncmp(argv[i], "--drop-gid", 10) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* Fill new_argv with the re-exec command line:
+ *
+ *   [placeholder for the sudo path, self,
+ *    drop_uid, drop_gid, (optional) iface_arg,
+ *    original argv[1..argc-1], NULL]
+ *
+ * The caller sizes new_argv; reexec_argv_capacity() gives the bound.
+ *
+ * Everything generated goes before the forwarded argv and nothing is filtered
+ * out of it. The caller's words keep their meaning that way: a trailing "--"
+ * still terminates options with nothing after it, and a "--" that getopt hands
+ * to "-i" as its argument stays attached to it. Dropping "--" instead would
+ * turn "-i --" into "-i --drop-uid=1000", handing the flag to the option as a
+ * value.
+ */
+static void build_reexec_argv(char **new_argv,
+                              int argc,
+                              char **argv,
+                              char *self,
+                              char *iface_arg,
+                              char *drop_uid,
+                              char *drop_gid)
+{
+    size_t idx = 0;
+    new_argv[idx++] = NULL; /* placeholder for the sudo path */
+    new_argv[idx++] = self;
+    new_argv[idx++] = drop_uid;
+    new_argv[idx++] = drop_gid;
+    if (iface_arg)
+        new_argv[idx++] = iface_arg;
+    for (int i = 1; i < argc; i++)
+        new_argv[idx++] = argv[i];
+    new_argv[idx] = NULL;
+}
+
+/* Slots build_reexec_argv can use, including the NULL terminator. */
+static size_t reexec_argv_capacity(int argc, bool forward_interfaces)
+{
+    /* sudo + self + drop-uid + drop-gid + NULL */
+    size_t extras = 5;
+    if (forward_interfaces)
+        extras++;
+    return extras + (size_t) (argc > 0 ? argc - 1 : 0);
+}
+
 void cli_ensure_capture_privileges(int argc,
                                    char **argv,
                                    const cli_options *opts,
@@ -381,18 +445,18 @@ void cli_ensure_capture_privileges(int argc,
         return;
     }
 
-    /* Build new argv:
-     *   [sudo, self, --drop-uid=NN, --drop-gid=NN,
-     *    (optional) --interface=extra,
-     *    original argv[1..argc-1],
-     *    NULL]
-     * argv[0] is patched per execv attempt below.
-     */
+    if (has_caller_drop_flag(argc, argv)) {
+        fprintf(stderr,
+                "geotrace: --drop-uid/--drop-gid are set by the sudo re-exec, "
+                "not by hand.\n"
+                "         Run unprivileged and let geotrace re-exec, or pass "
+                "--no-auto-sudo.\n");
+        return;
+    }
+
+    /* argv[0] is a placeholder here, patched per execv attempt below. */
     const bool forward_interfaces = extra_interfaces && *extra_interfaces;
-    size_t extras = 4; /* sudo + self + drop-uid + drop-gid */
-    if (forward_interfaces)
-        extras++;
-    size_t cap = extras + (size_t) (argc > 0 ? argc - 1 : 0) + 1;
+    size_t cap = reexec_argv_capacity(argc, forward_interfaces);
     char **new_argv = (char **) xcalloc(cap, sizeof(*new_argv));
 
     char drop_uid_buf[64];
@@ -405,19 +469,14 @@ void cli_ensure_capture_privileges(int argc,
     char iface_buf[GEOTRACE_MAX_INTERFACES * (GEOTRACE_IFACE_LEN + 1) + 16];
     iface_buf[0] = '\0';
 
-    size_t idx = 0;
-    new_argv[idx++] = NULL; /* placeholder for sudo path; patched below */
-    new_argv[idx++] = self;
-    new_argv[idx++] = drop_uid_buf;
-    new_argv[idx++] = drop_gid_buf;
     if (forward_interfaces) {
         snprintf(iface_buf, sizeof(iface_buf), "--interface=%s",
                  extra_interfaces);
-        new_argv[idx++] = iface_buf;
     }
-    for (int i = 1; i < argc; i++)
-        new_argv[idx++] = argv[i];
-    new_argv[idx] = NULL;
+
+    build_reexec_argv(new_argv, argc, argv, self,
+                      forward_interfaces ? iface_buf : NULL, drop_uid_buf,
+                      drop_gid_buf);
 
     fprintf(stderr,
             "geotrace: capture needs root privileges; re-running through "
