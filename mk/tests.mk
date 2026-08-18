@@ -45,6 +45,11 @@ $(braille_TEST_TARGET): LDFLAGS += $(WORLD_MAP_LIBS)
 # cli_normalize_interfaces, plus its theme.o/oom.o dependencies.
 $(eval $(call add-test,parsers,$(OUT)/cli.o $(OUT)/theme.o $(OUT)/oom.o))
 
+# The sudo re-exec command line. Includes cli.c directly to reach the static
+# argv builder, so it must NOT also link cli.o; platform.o is needed for
+# platform_iface_append, which cli.c calls.
+$(eval $(call add-test,cli,$(OUT)/theme.o $(OUT)/platform.o $(OUT)/oom.o))
+
 # Resolver pipeline stage: cache-only lookups, so no network in the test.
 $(eval $(call add-test,resolver,$(OUT)/resolver.o $(OUT)/geo.o $(OUT)/ring.o $(OUT)/oom.o))
 

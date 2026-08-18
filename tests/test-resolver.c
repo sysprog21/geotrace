@@ -51,8 +51,63 @@ static connection_event take(struct ring *r)
     exit(1);
 }
 
+/* Distinct public addresses in 1.0.0.0/8, which is_public_ipv4 accepts. */
+static uint32_t growth_ip(uint32_t i)
+{
+    return htonl(0x01000000u + i);
+}
+
+/* The cache grows by rehashing into a table twice the size. Insert well past
+ * the 0.7 load factor so that runs several times, then confirm every key still
+ * maps to its own coordinates: a rehash bug would not crash, it would quietly
+ * put markers in the wrong place. Timeout 0 keeps geo_lookup cache-only.
+ */
+#define GROWTH_KEYS 5000
+
+static void test_cache_growth(void)
+{
+    struct geo_cache *c = geo_cache_create(16);
+
+    for (uint32_t i = 0; i < GROWTH_KEYS; i++) {
+        geo_result r = {0};
+        r.valid = true;
+        r.point.lat = (double) i / 100.0;
+        r.point.lon = -(double) i / 100.0;
+        geo_cache_put(c, growth_ip(i), &r);
+    }
+
+    for (uint32_t i = 0; i < GROWTH_KEYS; i++) {
+        geo_result got = {0};
+        assert(geo_lookup(c, growth_ip(i), 0, &got));
+        assert(got.valid);
+        assert(got.point.lat == (double) i / 100.0);
+        assert(got.point.lon == -(double) i / 100.0);
+    }
+
+    /* A key that was never inserted must still miss. */
+    geo_result absent = {0};
+    assert(!geo_lookup(c, growth_ip(GROWTH_KEYS + 1), 0, &absent));
+    assert(!absent.valid);
+
+    /* Overwriting an existing key replaces it rather than adding a second entry
+     * that the probe could return instead.
+     */
+    geo_result replacement = {0};
+    replacement.valid = true;
+    replacement.point.lat = 12.5;
+    replacement.point.lon = 34.5;
+    geo_cache_put(c, growth_ip(0), &replacement);
+    geo_result reread = {0};
+    assert(geo_lookup(c, growth_ip(0), 0, &reread));
+    assert(reread.point.lat == 12.5 && reread.point.lon == 34.5);
+
+    geo_cache_destroy(c);
+}
+
 int main(void)
 {
+    test_cache_growth();
+
     struct ring *packets = ring_create(64, sizeof(packet_event));
     struct ring *conns = ring_create(64, sizeof(connection_event));
     struct ring *status = ring_create(8, sizeof(status_event));

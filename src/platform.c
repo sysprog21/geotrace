@@ -44,6 +44,11 @@ static bool is_loopback(const char *name)
     return name && (strcmp(name, "lo") == 0 || strcmp(name, "lo0") == 0);
 }
 
+/* Callers hold plain char[][N], and C before C23 has no implicit conversion
+ * from char(*)[N] to const char(*)[N]: GCC rejects it under -Wpedantic while
+ * clang accepts it silently, so every call site casts. Keeping the parameter
+ * const is worth that: this function must not write to the table.
+ */
 static bool already_listed(const char names[][GEOTRACE_IFACE_LEN],
                            size_t count,
                            const char *name)
@@ -60,15 +65,14 @@ bool platform_iface_append(char names[][GEOTRACE_IFACE_LEN],
                            size_t max,
                            const char *name)
 {
-    if (!names || !count || !name || !*name || *count > max)
+    if (!names || !count || !name || !*name || *count >= max)
         return false;
     if (is_loopback(name))
         return false;
-    if (*count >= max)
-        return false;
     if (strlen(name) >= GEOTRACE_IFACE_LEN)
         return false;
-    if (already_listed(names, *count, name))
+    if (already_listed((const char (*)[GEOTRACE_IFACE_LEN]) names, *count,
+                       name))
         return false;
     geotrace_copy_cstr(names[*count], GEOTRACE_IFACE_LEN, name);
     (*count)++;
@@ -283,7 +287,8 @@ size_t platform_list_ipv4_interfaces(interface_info *out, size_t max)
         geotrace_copy_cstr(out[count].name, GEOTRACE_IFACE_LEN, ifa->ifa_name);
         geotrace_copy_cstr(out[count].address, GEOTRACE_IP_LEN, ipbuf);
         out[count].selected =
-            already_listed(selected, selected_count, ifa->ifa_name);
+            already_listed((const char (*)[GEOTRACE_IFACE_LEN]) selected,
+                           selected_count, ifa->ifa_name);
         count++;
     }
 
@@ -341,7 +346,9 @@ size_t platform_list_ipv4_interfaces(interface_info *out, size_t max)
 
         geotrace_copy_cstr(out[count].name, GEOTRACE_IFACE_LEN, iface);
         geotrace_copy_cstr(out[count].address, GEOTRACE_IP_LEN, addr);
-        out[count].selected = already_listed(selected, selected_count, iface);
+        out[count].selected =
+            already_listed((const char (*)[GEOTRACE_IFACE_LEN]) selected,
+                           selected_count, iface);
         count++;
     }
     pclose(fp);

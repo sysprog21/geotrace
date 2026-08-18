@@ -3,9 +3,34 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
+#include <time.h>
 
 #define GEOTRACE_ARRAY_LEN(arr) (sizeof(arr) / sizeof((arr)[0]))
+
+/* Nanoseconds from start to end. int64_t rather than long because long is 32
+ * bits on 32-bit Linux, where it would overflow after two seconds.
+ *
+ * Every caller wants the same subtraction at a different scale, so the scaling
+ * stays at the call site: CLOCK_MONOTONIC deltas here are frame budgets, socket
+ * budgets, and marker ages.
+ */
+static inline int64_t geotrace_elapsed_ns(struct timespec start,
+                                          struct timespec end)
+{
+    return (int64_t) (end.tv_sec - start.tv_sec) * 1000000000 +
+           (int64_t) (end.tv_nsec - start.tv_nsec);
+}
+
+/* Nanoseconds from start until now, 0 if the clock read fails. */
+static inline int64_t geotrace_elapsed_ns_now(struct timespec start)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return geotrace_elapsed_ns(start, now);
+}
 
 static inline int geotrace_abs_int(int v)
 {
