@@ -473,7 +473,8 @@ int main(int argc, char **argv)
     emit_listening_banner(status_ring, source);
 
     /* Start source. */
-    if (source->start(source, packet_ring, &g_stop_requested) != 0) {
+    if (source->start(source, packet_ring, status_ring, &g_stop_requested) !=
+        0) {
         emit_status(status_ring, GEOTRACE_STATUS_ERROR,
                     "Source failed to start; UI will run with no data.");
     }

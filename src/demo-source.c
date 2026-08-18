@@ -93,8 +93,14 @@ static void *demo_thread_main(void *arg)
 
 static int demo_source_start(struct packet_source *self,
                              struct ring *packets_out,
+                             struct ring *statuses_out,
                              geotrace_flag *stop)
 {
+    /* The synthetic thread cannot fail after start(), so there is nothing to
+     * report asynchronously.
+     */
+    (void) statuses_out;
+
     demo_source *d = (demo_source *) self;
     d->out_ring = packets_out;
     d->stop_flag = stop;

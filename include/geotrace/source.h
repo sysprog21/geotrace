@@ -8,14 +8,23 @@
 #include <stddef.h>
 
 /* Packet source vtable. Sources push packet_event values onto an MPSC ring
- * supplied by the orchestrator. Sources never touch the status_ring directly —
- * main.c emits "Listening on …" / error banners using interfaces() and
+ * supplied by the orchestrator. The orchestrator still owns the "Listening on
+ * …" banner and the aggregate start-failed banner, built from interfaces() and
  * start()'s return code.
+ *
+ * statuses_out carries what that return code cannot express, both of which are
+ * per interface rather than per source:
+ *   - a capture thread that dies after a successful start (interface
+ *     disappears, VPN drops), which nothing else in the process can observe;
+ *   - one interface of several failing to open, where start() still returns
+ *     success and the stderr message is about to be painted over by the UI.
+ * Sources must not use it for anything the orchestrator already reports.
  */
 
 struct packet_source {
     int (*start)(struct packet_source *self,
                  struct ring *packets_out,
+                 struct ring *statuses_out,
                  geotrace_flag *stop);
     void (*stop)(struct packet_source *self);
     const char *const *(*interfaces)(struct packet_source *self);

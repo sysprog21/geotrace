@@ -75,8 +75,33 @@ typedef struct pcap_source {
     size_t iface_count;
 
     struct ring *out_ring;
+    struct ring *status_ring;
     geotrace_flag *stop_flag;
 } pcap_source_t;
+
+/* Report a per-interface capture failure. Called from a capture thread when it
+ * dies, and from start() when one interface of several cannot be opened, so it
+ * only touches the status ring, which is MPSC like the packet ring.
+ *
+ * start()'s return code cannot express either case: it is a single value for
+ * the whole set, and a partial start still returns success.
+ */
+static void report_capture_error(pcap_source_t *p,
+                                 const char *ifname,
+                                 const char *reason)
+{
+    if (!p->status_ring)
+        return;
+    status_event s = {0};
+    s.level = GEOTRACE_STATUS_ERROR;
+    clock_gettime(CLOCK_MONOTONIC, &s.created_at);
+    /* "No capture on" covers both callers. "Capture stopped" would be a lie
+     * for an interface that never started in the first place.
+     */
+    snprintf(s.message, sizeof(s.message), "No capture on %s: %s", ifname,
+             reason);
+    ring_put_latest(p->status_ring, &s);
+}
 
 /* link-layer offset table */
 
@@ -147,11 +172,15 @@ static void *capture_thread_main(void *arg)
     while (!geotrace_flag_is_raised(ct->parent->stop_flag)) {
         int n = pcap_dispatch(ct->handle, -1, on_packet, (u_char *) ct);
         if (n < 0) {
-            /* pcap_breakloop returns -2; otherwise log and bail. */
+            /* pcap_breakloop returns -2, which is the orderly shutdown path.
+             * Anything else means this interface is done for (unplugged, VPN
+             * torn down, permissions revoked), and this thread is about to
+             * exit: tell the UI, since nothing else can observe it.
+             */
             if (n == -2)
                 break;
-            const char *err = pcap_geterr(ct->handle);
-            (void) err;
+            report_capture_error(ct->parent, ct->ifname,
+                                 pcap_geterr(ct->handle));
             break;
         }
         /* n == 0 means timeout fired; loop will recheck the stop flag. */
@@ -224,10 +253,12 @@ static int open_one(capture_thread *ct, const char *ifname)
 
 static int pcap_source_start(struct packet_source *self,
                              struct ring *packets_out,
+                             struct ring *statuses_out,
                              geotrace_flag *stop)
 {
     pcap_source_t *p = (pcap_source_t *) self;
     p->out_ring = packets_out;
+    p->status_ring = statuses_out;
     p->stop_flag = stop;
 
     p->threads =
@@ -241,13 +272,19 @@ static int pcap_source_start(struct packet_source *self,
         if (open_one(ct, p->iface_storage[i]) != 0) {
             /* Best-effort: keep going with remaining interfaces. The
              * orchestrator sees a non-fatal partial start (return 0 if at least
-             * one opened, -1 if none opened).
+             * one opened, -1 if none opened), so a partial failure would
+             * otherwise be visible only on the stderr the UI is about to paint
+             * over.
              */
+            report_capture_error(p, p->iface_storage[i],
+                                 "interface could not be opened");
             continue;
         }
         if (pthread_create(&ct->thread, NULL, capture_thread_main, ct) != 0) {
             pcap_close(ct->handle);
             ct->handle = NULL;
+            report_capture_error(p, p->iface_storage[i],
+                                 "capture thread could not be started");
             continue;
         }
         p->thread_count++;
