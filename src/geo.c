@@ -92,10 +92,13 @@ bool is_public_ipv4_be(uint32_t ip_be)
 
 /* open-addressing cache */
 
+/* No tombstone state: entries are never deleted, only overwritten or rehashed
+ * by a grow. Add one only alongside a delete API, and reinstate the probe-skip
+ * logic in find_slot at the same time.
+ */
 typedef enum {
     SLOT_EMPTY = 0,
     SLOT_OCCUPIED = 1,
-    SLOT_TOMBSTONE = 2,
 } slot_state;
 
 typedef struct {
@@ -108,8 +111,7 @@ struct geo_cache {
     pthread_mutex_t mtx;
     cache_slot *slots;
     size_t capacity; /* power of two */
-    size_t count;    /* occupied (excludes tombstones) */
-    size_t tombstones;
+    size_t count;    /* occupied slots */
 
     /* CLOCK_MONOTONIC second before which no request is attempted, set when
      * ip-api answers 429. Without it every packet to an uncached IP re-issues a
@@ -124,8 +126,7 @@ struct geo_cache {
  */
 #define GEO_RATE_LIMIT_QUIET_S 60
 
-#define GEO_CACHE_LOAD_NUM \
-    7 /* resize when (count + tombstones) * 10 >= capacity * 7 */
+#define GEO_CACHE_LOAD_NUM 7 /* resize when count * 10 >= capacity * 7 */
 #define GEO_CACHE_LOAD_DEN 10
 #define GEO_CACHE_MIN_CAP 16
 
@@ -174,23 +175,23 @@ void geo_cache_destroy(struct geo_cache *c)
     free(c);
 }
 
-/* Probe sequence: linear, mask = capacity-1 (capacity is power of two). */
+/* Probe sequence: linear, mask = capacity-1 (capacity is power of two).
+ *
+ * Returns the matching slot, or the first empty slot where the key belongs.
+ * NULL only when the table is completely full, which needs resize_locked to
+ * have refused a grow at GEO_CACHE_MAX_CAP.
+ */
 static cache_slot *find_slot(cache_slot *slots, size_t cap, uint32_t key)
 {
     size_t mask = cap - 1;
     size_t idx = hash_key(key) & mask;
-    cache_slot *first_tomb = NULL;
 
     for (size_t i = 0; i < cap; i++) {
         cache_slot *s = &slots[(idx + i) & mask];
-        if (s->state == SLOT_EMPTY)
-            return first_tomb ? first_tomb : s;
-        if (s->state == SLOT_TOMBSTONE && !first_tomb)
-            first_tomb = s;
-        if (s->state == SLOT_OCCUPIED && s->key == key)
+        if (s->state == SLOT_EMPTY || s->key == key)
             return s;
     }
-    return first_tomb;
+    return NULL;
 }
 
 /* Caller holds the lock.
@@ -221,14 +222,12 @@ static bool resize_locked(struct geo_cache *c)
     free(c->slots);
     c->slots = new_slots;
     c->capacity = new_cap;
-    c->tombstones = 0;
     return true;
 }
 
 static bool needs_resize(const struct geo_cache *c)
 {
-    return (c->count + c->tombstones) * GEO_CACHE_LOAD_DEN >=
-           c->capacity * GEO_CACHE_LOAD_NUM;
+    return c->count * GEO_CACHE_LOAD_DEN >= c->capacity * GEO_CACHE_LOAD_NUM;
 }
 
 /* Internal insert. Caller holds the lock. */
@@ -246,8 +245,6 @@ static void cache_put_locked(struct geo_cache *c,
     cache_slot *s = find_slot(c->slots, c->capacity, key);
     if (!s)
         return;
-    if (s->state == SLOT_TOMBSTONE)
-        c->tombstones--;
     if (s->state != SLOT_OCCUPIED)
         c->count++;
     s->state = SLOT_OCCUPIED;
@@ -651,6 +648,7 @@ static geo_http_result http_lookup(const char *path,
         return auth_miss(out);
     if (status != 200)
         return GEO_HTTP_TRANSIENT;
+
 
     const char *body = find_body(buf);
     if (!body)
