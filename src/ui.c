@@ -176,8 +176,12 @@ struct ui_context {
     status_event latest_status;
     bool has_status;
 
-    /* Active markers — oldest evicted once full, so this never grows. */
+    /* Active markers, oldest first, as a ring: eviction and expiry both drop
+     * from the front, so both are an index bump instead of a shift. Iterate
+     * with marker_at().
+     */
     ui_marker markers[UI_MAX_VISIBLE_MARKERS];
+    size_t markers_head;
     size_t markers_count;
 
     /* Frame buffers */
@@ -274,27 +278,38 @@ static void set_latest_status(struct ui_context *ui, const status_event *ev)
     ui->has_status = true;
 }
 
+/* i is the logical index, 0 = oldest. */
+static const ui_marker *marker_at(const struct ui_context *ui, size_t i)
+{
+    return &ui->markers[(ui->markers_head + i) % UI_MAX_VISIBLE_MARKERS];
+}
+
+static void drop_oldest_marker(struct ui_context *ui)
+{
+    ui->markers_head = (ui->markers_head + 1) % UI_MAX_VISIBLE_MARKERS;
+    ui->markers_count--;
+}
+
 static void add_marker(struct ui_context *ui, const connection_event *ev)
 {
-    if (ui->markers_count == UI_MAX_VISIBLE_MARKERS) {
-        memmove(ui->markers, ui->markers + 1,
-                (UI_MAX_VISIBLE_MARKERS - 1) * sizeof(*ui->markers));
-        ui->markers_count = UI_MAX_VISIBLE_MARKERS - 1;
-    }
-    ui_marker *m = &ui->markers[ui->markers_count++];
+    if (ui->markers_count == UI_MAX_VISIBLE_MARKERS)
+        drop_oldest_marker(ui);
+
+    ui_marker *m = &ui->markers[(ui->markers_head + ui->markers_count) %
+                                UI_MAX_VISIBLE_MARKERS];
+    ui->markers_count++;
     m->coords = ev->coords;
     clock_gettime(CLOCK_MONOTONIC, &m->started);
 }
 
+/* Markers are stamped in arrival order, so the expired ones are always a
+ * prefix: stop at the first survivor rather than scanning the whole ring.
+ */
 static void prune_markers(struct ui_context *ui, struct timespec now)
 {
-    size_t out = 0;
-    for (size_t i = 0; i < ui->markers_count; i++) {
-        double age = elapsed_seconds(ui->markers[i].started, now);
-        if (age < UI_MARKER_TTL)
-            ui->markers[out++] = ui->markers[i];
-    }
-    ui->markers_count = out;
+    while (ui->markers_count > 0 &&
+           elapsed_seconds(marker_at(ui, 0)->started, now) >= UI_MARKER_TTL)
+        drop_oldest_marker(ui);
 }
 
 /* sin()-driven oscillator over [base - amp, base + amp]. omega is rad/s. */
@@ -393,7 +408,7 @@ static void render_marker_trajectories(struct ui_context *ui,
     trajectory trajs[UI_MAX_VISIBLE_MARKERS];
 
     for (size_t i = 0; i < ui->markers_count; i++) {
-        const ui_marker *marker = &ui->markers[i];
+        const ui_marker *marker = marker_at(ui, i);
         double age = elapsed_seconds(marker->started, now);
         double progress = geotrace_clamp01(age / UI_MARKER_GROW);
         double fade = 1.0;
@@ -424,10 +439,10 @@ static void render_marker_glyphs(struct ui_context *ui,
                                  struct timespec now)
 {
     for (size_t i = 0; i < ui->markers_count; i++) {
-        double age = elapsed_seconds(ui->markers[i].started, now);
-        world_place_marker(ui->cur, ui->width, map_h, ui->markers[i].coords.lat,
-                           ui->markers[i].coords.lon,
-                           destination_marker_glyph(age),
+        const ui_marker *marker = marker_at(ui, i);
+        double age = elapsed_seconds(marker->started, now);
+        world_place_marker(ui->cur, ui->width, map_h, marker->coords.lat,
+                           marker->coords.lon, destination_marker_glyph(age),
                            destination_marker_color(ui->theme, age),
                            destination_marker_flags(age));
     }
