@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+*.egg-info/
+dist/
+build/
+
+.venv/
+.env
+
+.vscode/
+.idea/
+
+# C build artifacts
+*.o
+*.d
+*.a
+compile_commands.json
+.cache/
+
+# Developer-local references (e.g., rv32emu checkout used as a make-fragment template)
+externals/
+
+# Claude Code per-user overrides (project-shared settings.json may still be committed)
+.claude/settings.local.json
