@@ -49,4 +49,29 @@ ifeq ($(UNAME_S),Darwin)
     CFLAGS += -D_DARWIN_C_SOURCE
 endif
 
+# Hardening. Requested explicitly rather than inherited: Ubuntu's GCC turns
+# most of this on by default, Apple's clang does not, so without these flags the
+# two platforms ship different binaries from the same source. geotrace parses
+# attacker-influenced bytes (packet headers, plaintext HTTP from ip-api) and
+# spends part of its life as root, so the defaults are not good enough.
+#
+# _FORTIFY_SOURCE is skipped for unoptimized and sanitizer builds: glibc emits a
+# #warning under -O0 that -Werror makes fatal, and clang predefines
+# _FORTIFY_SOURCE=0 under -fsanitize=address, so defining it again is a
+# -Wmacro-redefined error. Both arrive through EXTRA_CFLAGS, so key off that.
+# The -U keeps the definition deterministic where the toolchain already picked a
+# level of its own (Ubuntu's GCC defaults to 3), instead of failing on the
+# redefinition warning.
+HARDEN_CFLAGS := -fstack-protector-strong -fno-strict-aliasing
+ifeq ($(strip $(filter -O0 -fsanitize%,$(EXTRA_CFLAGS))),)
+    HARDEN_CFLAGS += -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
+endif
+CFLAGS += $(HARDEN_CFLAGS)
+
+# Full RELRO plus immediate binding. Apple's ld64 has no -z options; its
+# equivalents (PIE, chained fixups) are already the default there.
+ifneq ($(UNAME_S),Darwin)
+    LDFLAGS += -Wl,-z,relro,-z,now
+endif
+
 endif # _GEOTRACE_MK_TOOLCHAIN_INCLUDED
