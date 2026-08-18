@@ -102,14 +102,16 @@ run: $(BIN)
 # Test framework hooks
 include mk/tests.mk
 
+# The smoke run goes through .ci/run-demo.sh so `make check` and CI apply the
+# same gate: exiting cleanly is not enough, the run has to have rendered
+# frames. The binary handles SIGTERM, so a deadlock before the first frame
+# exits exactly like a healthy run.
 check: all tests
 	$(Q)$(call notice, Smoke run: --demo for 3s)
-	$(Q)sh scripts/run-with-timeout.sh 3 $(BIN) --demo >/dev/null 2>&1; status=$$?; \
-	    if [ $$status -eq 124 ] || [ $$status -eq 0 ]; then \
-	        $(call notice, [OK]); \
-	    else \
-	        $(call error_msg, --demo exited with $$status); exit 1; \
-	    fi
+	$(Q).ci/run-demo.sh $(BIN) 3 >/dev/null || { \
+	    $(call error_msg, --demo smoke run failed); exit 1; \
+	}
+	$(Q)$(call notice, [OK])
 
 # Maintenance targets
 clean:
@@ -126,9 +128,16 @@ install: $(BIN)
 	$(Q)install -m 0755 $(BIN) $(DESTDIR)$(PREFIX)/bin/geotrace
 	$(Q)$(call notice, installed -> $(DESTDIR)$(PREFIX)/bin/geotrace)
 
+# Must match the version .ci/check-format.sh enforces: clang-format 22
+# reformats the _Static_assert chain in src/world-map.c, so a bare
+# `clang-format` would rewrite the tree into something CI rejects. Override
+# with CLANG_FORMAT=/path/to/clang-format when the binary is not on PATH
+# under that name (e.g. Homebrew's llvm@20).
+CLANG_FORMAT ?= clang-format-20
+
 format:
 	$(Q)find src include tests -type f \( -name '*.c' -o -name '*.h' \) 2>/dev/null \
-	    | xargs -r clang-format -i
+	    | xargs -r $(CLANG_FORMAT) -i
 
 # Land mask pipeline: emit a C array from the tracked zlib-compressed blob via
 # scripts/bin2c.py. The blob in assets/ is Natural Earth 1:110m land at 360x180.

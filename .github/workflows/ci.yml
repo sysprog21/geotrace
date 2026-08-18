@@ -1,0 +1,111 @@
+name: CI
+
+# Lint on ubuntu-24.04, then build + test on ubuntu-24.04 and macos-15.
+# Both platforms matter: Linux capture goes through AF_PACKET and the
+# privilege-drop path, macOS through BPF, and only the macOS leg proves the
+# libpcap-without-pkg-config header probe in mk/deps.mk still works.
+#
+# Action versions track the latest major release (no SHA pinning).
+# clang-format is pinned to 20 (noble-updates/universe ships 20.1.2) because
+# clang-format 22 reformats the _Static_assert chain in src/world-map.c
+# differently; cppcheck and shfmt float with the runner image.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A force-push supersedes the previous PR run; main keeps every run so each
+# landed commit has a completed CI record.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install lint tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-format-20 cppcheck file shfmt
+
+      - name: Check trailing newline
+        run: .ci/check-newline.sh
+
+      - name: Check clang-format
+        env:
+          CLANG_FORMAT: clang-format-20
+        run: .ci/check-format.sh
+
+      - name: Check shell formatting (shfmt)
+        # shfmt reads the [*.sh] section of .editorconfig, so this stays in
+        # lockstep with the editor config rather than a second style list.
+        # xargs, not $(...): an empty list would otherwise leave shfmt
+        # reading stdin forever.
+        run: git ls-files -z -- '*.sh' | xargs -0 shfmt -d
+
+      - name: Security checks
+        run: .ci/check-security.sh
+
+      - name: Static analysis (cppcheck)
+        run: .ci/check-cppcheck.sh
+
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@v7
+
+      # macOS needs nothing installed: libpcap and zlib ship in the SDK and
+      # mk/deps.mk falls back to a header probe when pkg-config has no
+      # libpcap metadata, which is exactly the macOS case.
+      - name: Install build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 libpcap-dev zlib1g-dev
+
+      - name: Build, unit tests, and --demo smoke run
+        run: make -j"$(getconf _NPROCESSORS_ONLN)" check
+
+      - name: Assert live capture was compiled in
+        # Without libpcap, mk/config.mk silently drops to ENABLE_PCAP=0 and
+        # the bpf-filter test disappears. Its binary is the cheapest proof
+        # the full feature set was built rather than the demo-only subset.
+        run: test -x build/tests/bpf-filter/test-bpf-filter
+
+      - name: Frame pacing at the lowest rate
+        # --fps=1 is where the pacer is most fragile: the whole frame budget is
+        # 1e9 ns, which nanosleep rejects outright if it lands in tv_nsec. A
+        # paced run writes about 23 KB in three seconds and an unpaced one
+        # nearly half a megabyte, so the byte ceiling separates them.
+        env:
+          DEMO_MAX_BYTES: 150000
+        run: .ci/run-demo.sh ./build/geotrace 3 --fps=1
+
+      - name: Interface detection
+        # Exercises platform_detect_interfaces (ip route / route -n get) on
+        # both platforms; no privileges needed to enumerate. The binary exits
+        # 0 even when it finds nothing, so match on the output instead.
+        run: |
+          out=$(./build/geotrace --list-interfaces)
+          printf '%s\n' "$out"
+          case "$out" in
+          *"No IPv4 interfaces detected"*) exit 1 ;;
+          esac
+
+      - name: Sanitizers (ASan/UBSan + TSan)
+        run: .ci/check-sanitize.sh
