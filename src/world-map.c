@@ -127,10 +127,18 @@ static void project_equirectangular(double lat,
     *oy = geotrace_clamp_int((int) y, 0, h - 1);
 }
 
+/* Both projection entry points write their outputs before validating, so a
+ * rejected call leaves the caller with (0, 0) rather than whatever was on its
+ * stack. world_place_marker indexes with the result unconditionally, and that
+ * is only safe today because it repeats these same bounds checks itself.
+ */
 void world_geo_to_canvas(double lat, double lon, int w, int h, int *ox, int *oy)
 {
-    if (!ox || !oy || w <= 0 || h <= 0 || w > WORLD_DIM_MAX ||
-        h > WORLD_DIM_MAX)
+    if (!ox || !oy)
+        return;
+    *ox = 0;
+    *oy = 0;
+    if (w <= 0 || h <= 0 || w > WORLD_DIM_MAX || h > WORLD_DIM_MAX)
         return;
     project_equirectangular(lat, lon, w, h, ox, oy);
 }
@@ -142,8 +150,11 @@ void world_geo_to_virtual(double lat,
                           int *ox,
                           int *oy)
 {
-    if (!ox || !oy || w <= 0 || h <= 0 || w > WORLD_DIM_MAX ||
-        h > WORLD_DIM_MAX)
+    if (!ox || !oy)
+        return;
+    *ox = 0;
+    *oy = 0;
+    if (w <= 0 || h <= 0 || w > WORLD_DIM_MAX || h > WORLD_DIM_MAX)
         return;
     project_equirectangular(lat, lon, w * WORLD_BRAILLE_DOT_W,
                             h * WORLD_BRAILLE_DOT_H, ox, oy);
