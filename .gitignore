@@ -25,3 +25,4 @@ externals/
 
 # Claude Code per-user overrides (project-shared settings.json may still be committed)
 .claude/settings.local.json
+.frama-c/

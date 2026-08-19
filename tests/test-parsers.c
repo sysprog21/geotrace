@@ -10,6 +10,13 @@
  * pair is compiled here gets exercised.
  */
 
+/* Two modules under test. The JSON and HTTP-status parsers now live in
+ * geo-http.c and are reached through its header (geo-http.o is linked); the
+ * recv_response socket-budget cases still need geo.c's statics, so that file is
+ * included directly as before.
+ */
+#include "geo-http.h"
+
 #include "geo.c"
 #include "platform.c"
 
@@ -24,9 +31,9 @@
 static void expect_json(const char *json, const char *key, const char *want)
 {
     char out[64];
-    bool ok = json_get_string(json, key, out, sizeof(out));
+    bool ok = geo_json_get_string(json, key, out, sizeof(out));
     if (!ok || strcmp(out, want) != 0) {
-        fprintf(stderr, "FAIL json_get_string(%s, %s): ok=%d got \"%s\"\n",
+        fprintf(stderr, "FAIL geo_json_get_string(%s, %s): ok=%d got \"%s\"\n",
                 json, key, (int) ok, ok ? out : "");
         exit(1);
     }
@@ -35,14 +42,14 @@ static void expect_json(const char *json, const char *key, const char *want)
 static void expect_json_fail(const char *json, const char *key)
 {
     char out[64];
-    if (json_get_string(json, key, out, sizeof(out))) {
-        fprintf(stderr, "FAIL json_get_string(%s, %s): expected failure\n",
+    if (geo_json_get_string(json, key, out, sizeof(out))) {
+        fprintf(stderr, "FAIL geo_json_get_string(%s, %s): expected failure\n",
                 json, key);
         exit(1);
     }
 }
 
-static void test_json_get_string(void)
+static void test_geo_json_get_string(void)
 {
     expect_json("{\"country\":\"Taiwan\"}", "country", "Taiwan");
     expect_json("{\"a\":1,\"city\":\"Taipei\",\"b\":2}", "city", "Taipei");
@@ -66,6 +73,17 @@ static void test_json_get_string(void)
     expect_json_fail("{\"c\":\"a\\u\"}", "c");
     expect_json_fail("{\"c\":\"a\\uZZZZ\"}", "c");
 
+    /* That failure path writes into "out" before it bails, so it must leave a
+     * terminated buffer behind. A caller with an unzeroed buffer would
+     * otherwise read off the end of it.
+     */
+    char partial[8];
+    memset(partial, 'Z', sizeof(partial));
+    assert(!geo_json_get_string("{\"c\":\"abc\\u12\"}", "c", partial,
+                                sizeof(partial)));
+    assert(memchr(partial, '\0', sizeof(partial)) != NULL);
+    assert(strcmp(partial, "abc") == 0);
+
     /* Control bytes from the wire must not reach the terminal verbatim. */
     expect_json("{\"c\":\"a\x1b[31mb\"}", "c", "a [31mb");
     expect_json(
@@ -82,28 +100,30 @@ static void test_json_get_string(void)
 
     /* Truncation to cap, still NUL-terminated. */
     char small[4];
-    assert(json_get_string("{\"c\":\"abcdef\"}", "c", small, sizeof(small)));
+    assert(
+        geo_json_get_string("{\"c\":\"abcdef\"}", "c", small, sizeof(small)));
     assert(strcmp(small, "abc") == 0);
 
     /* cap == 0 reaches the copy loop and must not write through out at all. (A
      * non-string value would bail at the type check before getting here.)
      */
-    assert(json_get_string("{\"c\":\"abc\"}", "c", NULL, 0));
+    assert(geo_json_get_string("{\"c\":\"abc\"}", "c", NULL, 0));
 }
 
 /* parse_status_code */
 
 static void expect_status(const char *line, int want)
 {
-    int got = parse_status_code(line);
+    int got = geo_http_parse_status_code(line);
     if (got != want) {
-        fprintf(stderr, "FAIL parse_status_code(\"%s\") = %d, want %d\n", line,
+        fprintf(stderr,
+                "FAIL geo_http_parse_status_code(\"%s\") = %d, want %d\n", line,
                 got, want);
         exit(1);
     }
 }
 
-static void test_parse_status_code(void)
+static void test_geo_http_parse_status_code(void)
 {
     expect_status("HTTP/1.1 200 OK\r\n\r\n", 200);
     expect_status("HTTP/1.0 404 Not Found\r\n", 404);
@@ -123,6 +143,14 @@ static void test_parse_status_code(void)
     expect_status("HTTP/1.1x200 OK", -1);
     expect_status("HTTP/1.1 2O0 OK", -1);
     expect_status("HTTP/1.1 -12 OK", -1);
+
+    /* Three digits are not enough: there is no status below 100, so a code
+     * with a leading zero is not a status code.
+     */
+    expect_status("HTTP/1.1 042 x", -1);
+    expect_status("HTTP/1.1 000 x", -1);
+    expect_status("HTTP/1.1 099 x", -1);
+    expect_status("HTTP/1.1 100 Continue\r\n", 100);
 }
 
 /* classify_status */
@@ -133,10 +161,10 @@ static void expect_class(int status, geo_http_result want, bool want_sentinel)
     geo_result r;
     memset(&r, 0xAA, sizeof(r));
 
-    geo_http_result got = classify_status(status, &r);
+    geo_http_result got = geo_http_classify_status(status, &r);
     if (got != want) {
-        fprintf(stderr, "FAIL classify_status(%d) = %d, want %d\n", status,
-                (int) got, (int) want);
+        fprintf(stderr, "FAIL geo_http_classify_status(%d) = %d, want %d\n",
+                status, (int) got, (int) want);
         exit(1);
     }
     geo_result zeroed;
@@ -146,13 +174,14 @@ static void expect_class(int status, geo_http_result want, bool want_sentinel)
          * stale coordinates left behind by a partial reset would be cached as
          * an authoritative miss.
          */
-        fprintf(stderr, "FAIL classify_status(%d): result not zeroed\n",
+        fprintf(stderr,
+                "FAIL geo_http_classify_status(%d): result not zeroed\n",
                 status);
         exit(1);
     }
 }
 
-static void test_classify_status(void)
+static void test_geo_http_classify_status(void)
 {
     /* 200 means "keep parsing"; the body decides. */
     expect_class(200, GEO_HTTP_OK, false);
@@ -268,6 +297,7 @@ static void *trickle_writer(void *arg)
     int fd = *(int *) arg;
     char byte = 'x';
     assert(send(fd, &byte, 1, 0) == 1);
+
     /* Split the sleep: at 1000 ms the whole value lands on tv_nsec as 1e9,
      * which nanosleep rejects with EINVAL, and the writer would then close
      * immediately and hand the reader the EOF this test exists to withhold.
@@ -341,10 +371,10 @@ static void test_recv_response_complete(void)
     assert(pthread_join(tid, NULL) == 0);
 }
 
-/* A lookup that never reached the network must leave the cache alone. This
- * test lives here rather than in test-resolver.c because the count is private
- * to geo.c, and counting is the only way to see the difference: a wrongly
- * cached transient looks exactly like an authoritative miss from outside.
+/* A lookup that never reached the network must leave the cache alone. This test
+ * lives here rather than in test-resolver.c because the count is private to
+ * geo.c, and counting is the only way to see the difference: a wrongly cached
+ * transient looks exactly like an authoritative miss from outside.
  */
 static void test_cache_only_miss_is_not_cached(void)
 {
@@ -363,16 +393,59 @@ static void test_cache_only_miss_is_not_cached(void)
     geo_cache_destroy(c);
 }
 
+/* The response reaches us over plaintext HTTP with no TLS on ip-api's free
+ * tier, so these bytes are whatever lands on the socket, and lat/lon are the
+ * coordinates the map draws.
+ */
+static void test_nested_key_does_not_shadow_top_level(void)
+{
+    double v = 0;
+
+    /* strstr matched the key anywhere, so the nested field won by being first
+     * and a lookup for "lat" returned 99.0 instead of 25.033.
+     */
+    assert(geo_json_get_double("{\"meta\":{\"lat\":99.0},\"lat\":25.033}",
+                               "lat", &v));
+    assert(v > 25.0 && v < 26.0);
+
+    v = 0;
+    assert(geo_json_get_double("{\"hits\":[{\"lat\":99.0}],\"lat\":25.033}",
+                               "lat", &v));
+    assert(v > 25.0 && v < 26.0);
+
+    /* A key present only inside a nested object is not a top-level field. */
+    assert(!geo_json_get_double("{\"meta\":{\"zz\":1.0}}", "zz", &v));
+}
+
+static void test_number_must_end_at_a_delimiter(void)
+{
+    double v = 0;
+
+    /* strtod stops at the first unusable byte, so "25abc" read as 25 and a
+     * malformed coordinate became authoritative instead of a miss.
+     */
+    assert(!geo_json_get_double("{\"lat\":25abc}", "lat", &v));
+    assert(!geo_json_get_double("{\"lat\":1.2.3}", "lat", &v));
+
+    /* Legal terminators still parse. */
+    assert(geo_json_get_double("{\"lat\":25.5,\"lon\":1}", "lat", &v));
+    assert(v > 25.4 && v < 25.6);
+    assert(geo_json_get_double("{\"lat\":25.5}", "lat", &v));
+    assert(geo_json_get_double("{\"lat\":25.5 }", "lat", &v));
+}
+
 int main(void)
 {
-    test_json_get_string();
-    test_parse_status_code();
-    test_classify_status();
+    test_geo_json_get_string();
+    test_geo_http_parse_status_code();
+    test_geo_http_classify_status();
     test_normalize_interfaces();
     test_row_parsers();
     test_recv_response_timeout();
     test_recv_response_complete();
     test_cache_only_miss_is_not_cached();
+    test_nested_key_does_not_shadow_top_level();
+    test_number_must_end_at_a_delimiter();
     fprintf(stderr, "parser tests passed\n");
     return 0;
 }

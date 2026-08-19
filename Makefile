@@ -113,6 +113,159 @@ check: all tests
 	}
 	$(Q)$(call notice, [OK])
 
+# Deductive verification (Frama-C/WP) of the ACSL in include/geotrace/util.h,
+# src/ring.c, src/packet-decode.c and src/geo-http.c. Optional: Frama-C is not
+# a build dependency, so this is not wired into `check`. Each file's header
+# comment records what is proved, what is assumed, and what is still open.
+FRAMA_C ?= frama-c
+
+# One process over all of VERIFY_SRCS: every invocation reparses the whole libc
+# first, so a second process is a second parse for nothing.
+#
+# Scope decisions, each already paid for once:
+#   world-map.c, ui.c  Not targets, by request. Projection maths and rendering,
+#                      where a defect is a wrong pixel, and between them the
+#                      largest source of unproved obligations in the tree.
+#   geo.c              Half-analyzable. Needs -DGEOTRACE_VERSION=\"...\" or the
+#                      preprocessor stops on the User-Agent concatenation and
+#                      reports it as a parse error in geo.c. WP then aborts in
+#                      Frama-C's own libc ("sys/socket.h: Invalid infinite
+#                      range") for anything pulling in the socket specs.
+#   geo-http.c         Carries ACSL for its whole interface, but only the two
+#                      functions listed below discharge completely; the
+#                      extractors prove 66/86 and 15/24 and still need loop and
+#                      frame work. Listing them would import known-red goals
+#                      into a gate whose value is that green means something.
+#
+# util.h is all static inline, so it needs a host TU to land in the AST, and
+# packet-decode.c is the smallest one that includes it. Exactly one such TU
+# belongs here: a second duplicates every inline goal (they reappear with a
+# "_0" suffix, failures included), and adding resolver.c cost 100 goals and a
+# third of the cold run for no extra coverage, since the inlines are analyzed
+# whether or not a listed TU calls them.
+VERIFY_SRCS := src/ring.c src/packet-decode.c src/geo-http.c
+
+VERIFY_FCTS := slot_at,take_locked,ring_put_latest,ring_take,ring_try_take \
+               ring_shutdown,ring_size,ring_create \
+               geotrace_elapsed_ns,geotrace_abs_int,geotrace_min_int \
+               geotrace_max_int,geotrace_clamp_int,geotrace_clamp_double \
+               geotrace_clamp01,geotrace_max_float \
+               geotrace_copy_cstr,geotrace_copy_span \
+               packet_decode_ipv4 \
+               geo_http_classify_status,sanitize_display_byte
+comma := ,
+empty :=
+space := $(empty) $(empty)
+
+# Timeout dominates cold runs: every unprovable goal burns it in full, every
+# time. Measured here, the slowest goal that does prove takes ~6s, so 15s is
+# ~2.5x margin. That margin is machine-dependent -- on a slower or loaded box
+# that goal gets cut off, appears in the baseline diff as a new unproved name,
+# and fails the build for a reason in the environment. Raise WP_TIMEOUT there
+# (CI uses 90) rather than editing the baseline.
+WP_TIMEOUT ?= 15
+WP_PAR     ?= $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
+
+# WP caches verdicts under .frama-c/, which is why a warm run is several times
+# faster; parsing is ~1s, so the rest is prover time. CI caches that directory.
+# Do not "improve" it with -wp-cache-dir: measured markedly slower than the
+# default session cache (warm ~12s to ~21-28s).
+
+# Frama-C exits 0 with goals unproved, so without this the target would report
+# success having proved nothing. The baseline pins the unproved goals by name
+# (a new one fails; one that starts proving fails too, so it cannot rot) and the
+# proved/total tally (so deleting a contract cannot slip through by removing the
+# goal). Names only, never WP's status word -- see verify-run for why that word
+# is not portable. Intended changes go through `make verify-baseline`.
+WP_BASELINE := .ci/wp-known-unproved.txt
+
+# Noise that is not actionable here, silenced at the source so the run stays
+# readable:
+#   annot:missing-spec=inactive  memcpy/strlen lack exits+terminates; fixing it
+#                                means editing Frama-C's libc.
+#   -no-warn-unaligned-pointer   RTE emits \aligned / \valid_function guards WP
+#   -rte-no-pointer-call         cannot express, then warns it skipped them.
+#                                Nothing here is unaligned or calls a function
+#                                pointer, so no check is lost.
+# pedantic-assigns stays ON: a contract that forgot its frame is a real defect.
+#
+# Alt-Ergo alone, and named rather than left to WP's default set. Adding Z3
+# closes one more goal (xmalloc's precondition in ring_create) but then BOTH
+# provers run every unprovable goal to the full budget: cold 54s to 98s, warm
+# 16s to 60s. Wrong side of that trade.
+#
+# Naming it also makes the baseline reproducible: WP's default set is whatever
+# why3 detected on the machine, so a developer box with extra provers installed
+# could reach a different verdict than CI and fail the diff for a reason in the
+# environment rather than the code.
+#
+# Deferred (=, not :=) so the WP_PAR probe forks only under `make verify`, not
+# on every `make`, `make clean`, and tab-completion.
+WPFLAGS = -wp -wp-rte -wp-model Typed+cast -wp-prover alt-ergo \
+           -wp-timeout $(WP_TIMEOUT) -wp-par $(WP_PAR) \
+           -wp-no-warn-memory-model -kernel-warn-key annot:missing-spec=inactive \
+           -no-warn-unaligned-pointer -rte-no-pointer-call
+
+verify-run: | $(OUT)
+	$(Q)command -v $(FRAMA_C) >/dev/null || { \
+	    $(call error_msg, $(FRAMA_C) not found; opam install frama-c); exit 1; \
+	}
+	$(Q)$(call notice, verifying $(VERIFY_SRCS) [timeout $(WP_TIMEOUT)s par $(WP_PAR)])
+	$(Q)$(FRAMA_C) -cpp-extra-args="-Iinclude" $(VERIFY_SRCS) $(WPFLAGS) \
+	    -wp-fct $(subst $(space),$(comma),$(strip $(VERIFY_FCTS))) \
+	    >$(OUT)/verify.log 2>&1 || { cat $(OUT)/verify.log; exit 1; }
+	@# Filters the terminal copy only; $(OUT)/verify.log keeps every line. That
+	@# is deliberate, not an oversight: the log is what verify.yml uploads as
+	@# wp-logs, and an artifact exists to be read when something went wrong, so
+	@# it should not be the lossy copy. The goal extraction below is unaffected
+	@# either way -- warnings never match its pattern.
+	@#
+	@# What is filtered: WP models void * as char *, so allocating the ring
+	@# struct and memcpy on typed fields report a pointer mismatch. Same
+	@# artifact throughout and not fixable here -- memcpy on a typed field is
+	@# correct C, and C's implicit void * conversion warns identically
+	@# (measured). Instances the code could honestly remove already went; the
+	@# ring slab is char * now.
+	@#
+	@# Matched as the whole two-line message: WP prints uncategorized warnings
+	@# as a "file:line: Warning:" header plus an indented body, so a
+	@# header-shaped pattern would strip the location off every one of them,
+	@# including soundness-relevant ones like "Missing decreases clause".
+	$(Q)perl -0777 -pe 's/^\[wp\] [^\n]*: Warning: *\n[ ]+Cast with incompatible pointers types[^\n]*\n//mg' \
+	    $(OUT)/verify.log
+	@# Goal NAME only, never WP's status word. Timeout and Failure both mean
+	@# "not proved", but which one appears depends on the budget: at the local
+	@# 15s Alt-Ergo is cut off and reports Timeout, while at CI's 90s it reaches
+	@# a verdict and reports Failure. Pinning the word made the baseline fail
+	@# across machines for a difference that carries no information.
+	$(Q){ sed -n 's/^\[wp\] \[[A-Za-z]*\] \(typed[a-zA-Z_0-9]*\).*/unproved \1/p' \
+	        $(OUT)/verify.log | sort -u; \
+	      sed -n 's/^\[wp\] \(Proved goals: *[0-9]* \/ [0-9]*\).*/total \1/p' \
+	        $(OUT)/verify.log; \
+	    } > $(OUT)/wp-unproved.txt
+
+verify: verify-run
+	$(Q)test -f $(WP_BASELINE) || { \
+	    $(call error_msg, $(WP_BASELINE) is missing - it must be tracked in git); \
+	    $(call error_msg, seed it with: make verify-baseline); \
+	    exit 1; \
+	}
+	$(Q)diff -u $(WP_BASELINE) $(OUT)/wp-unproved.txt || { \
+	    $(call error_msg, WP goal status changed vs $(WP_BASELINE)); \
+	    $(call error_msg, '-' lines disappeared - a goal now proves$(comma) or a contract was deleted); \
+	    $(call error_msg, '+' lines are new - a regression$(comma) or a contract was added); \
+	    $(call error_msg, if the change is intended: make verify-baseline); \
+	    exit 1; \
+	}
+	$(Q)$(call notice, WP goal status matches baseline)
+
+# Re-seed the baseline after an intended change. Separate target so that
+# refreshing it is always a deliberate act with its own diff to review, never a
+# side effect of running the checker.
+verify-baseline: verify-run
+	$(Q)cp $(OUT)/wp-unproved.txt $(WP_BASELINE)
+	$(Q)$(call notice, reseeded $(WP_BASELINE) - review the diff before committing)
+
 # Maintenance targets
 clean:
 	$(Q)rm -rf $(OUT)
@@ -128,16 +281,27 @@ install: $(BIN)
 	$(Q)install -m 0755 $(BIN) $(DESTDIR)$(PREFIX)/bin/geotrace
 	$(Q)$(call notice, installed -> $(DESTDIR)$(PREFIX)/bin/geotrace)
 
-# Must match the version .ci/check-format.sh enforces: clang-format 22
-# reformats the _Static_assert chain in src/world-map.c, so a bare
-# `clang-format` would rewrite the tree into something CI rejects. Override
-# with CLANG_FORMAT=/path/to/clang-format when the binary is not on PATH
-# under that name (e.g. Homebrew's llvm@20).
+# Must match .ci/check-format.sh: clang-format 22 reformats the _Static_assert
+# chain in src/world-map.c differently, so a bare `clang-format` writes a tree
+# CI rejects. Override when the binary is not on PATH under this name.
 CLANG_FORMAT ?= clang-format-20
 
-format:
+# ACSL lives in comments, and clang-format rewraps a long "/*@ ... */" by
+# inserting a " * " continuation, turning it into a parse error. That happened
+# here and only `make verify` caught it, so re-parse afterwards (~1s, skipped
+# when Frama-C is absent). Prefer the one-line "//@ assert ..." form near the
+# column limit; clang-format leaves "//" alone.
+#
+# Order-only on $(OUT): the re-parse redirects into $(OUT)/acsl-parse.log, and
+# on a clean tree that redirect fails before Frama-C starts, which the "||"
+# would then report as a broken annotation.
+indent: | $(OUT)
 	$(Q)find src include tests -type f \( -name '*.c' -o -name '*.h' \) 2>/dev/null \
 	    | xargs -r $(CLANG_FORMAT) -i
+	$(Q)command -v $(FRAMA_C) >/dev/null || exit 0; \
+	$(FRAMA_C) -cpp-extra-args="-Iinclude -Isrc" $(VERIFY_SRCS) -print >/dev/null 2>$(OUT)/acsl-parse.log \
+	    || { $(call error_msg, formatting broke an ACSL annotation:); \
+	         grep -E 'annot-error|Failure' $(OUT)/acsl-parse.log | head -4; exit 1; }
 
 # Land mask pipeline: emit a C array from the tracked zlib-compressed blob via
 # scripts/bin2c.py. The blob in assets/ is Natural Earth 1:110m land at 360x180.
@@ -150,7 +314,7 @@ $(OUT)/%.o: $(OUT)/%.c | $(OUT)
 	$(VECHO) "  CC\t$@\n"
 	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF $@.d $<
 
-.PHONY: all debug sanitize run tests check clean distclean install format
+.PHONY: all debug sanitize run tests check verify verify-run verify-baseline clean distclean install indent
 
 # Auto-deps
 -include $(deps)

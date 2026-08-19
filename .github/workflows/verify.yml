@@ -1,0 +1,129 @@
+# Frama-C/WP proofs of the ring's concurrency invariant, util.h's helpers, the
+# IPv4 frame decoder, and the two geo-http functions that discharge completely.
+#
+# Split out of ci.yml rather than living there as a job: it has its own trigger
+# set (docs changes cannot move a proof), its own toolchain, and its own timeout
+# knob, and burying that in the build matrix made all three invisible.
+#
+# GATING. An unproved obligation fails this workflow. `continue-on-error: true`
+# would make it advisory, and an advisory proof check is one nobody notices
+# going red. The one thing that makes gating risky is the prover budget, and
+# that is addressed below rather than papered over.
+name: Proofs
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', 'assets/**']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', 'assets/**']
+  workflow_dispatch:
+  # A merge queue runs the merged result, not the PR, and carries no
+  # pull_request payload. Without this trigger a queue could merge a change to
+  # the proved sources with this workflow never having run on the result.
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Deliberately far above the 15s local default, for one narrow reason.
+  # .ci/wp-known-unproved.txt pins goal NAMES only, so a goal reported Timeout
+  # here and Failure there does not break the diff: both read as "unproved".
+  # What the margin buys is the other direction -- a goal that proves on a
+  # developer box but gets cut off on a slower or contended runner appears as a
+  # NEW unproved name and fails the build for a reason in the environment
+  # rather than the code.
+  #
+  # Measured locally: the slowest goal that actually proves takes about 6s, and
+  # at a budget of 8s one run in two flipped one. A runner of unknown speed gets
+  # a wide margin instead of a coin flip.
+  #
+  # It costs only cold-run time, and only on the goals that cannot be proved
+  # (the set listed in that baseline), because everything else finishes in well
+  # under a second and the WP cache carries verdicts between runs. Verified at
+  # this budget locally: the same goals stay unproved and the baseline matches.
+  WP_TIMEOUT: 90
+
+jobs:
+  verify:
+    name: Frama-C WP proofs (make verify)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Frama-C
+        id: framac
+        uses: ./.github/actions/framac
+
+      # Almost all of the runtime is prover time, and the goals that cannot be
+      # proved burn the full budget every time they are retried. Reusing WP's
+      # verdicts is worth more than any flag. The key covers the proved sources,
+      # every public header, and the Makefile that holds VERIFY_FCTS and the
+      # model selection, so a change to what is proved cannot silently take an
+      # exact cache hit and skip the save.
+      - name: Cache WP proof results
+        uses: actions/cache@v6
+        with:
+          path: .frama-c
+          # The analyzer versions are part of the key, not just the sources.
+          # Without them a pin bump in .github/actions/framac changes the prover
+          # while this key stays put, so restore-keys hands back verdicts the
+          # PREVIOUS analyzer produced and `make verify` reports them as proved
+          # rather than re-proving against the new one -- which would defeat the
+          # very thing that action's comment says the pin is for.
+          key: wp-${{ runner.os }}-fc${{ steps.framac.outputs.framac_version }}-ae${{ steps.framac.outputs.alt_ergo_version }}-ml${{ steps.framac.outputs.ocaml_version }}-${{ hashFiles('src/*.c', 'src/*.h', 'include/geotrace/*.h', 'Makefile', '.ci/wp-known-unproved.txt') }}
+          restore-keys: wp-${{ runner.os }}-fc${{ steps.framac.outputs.framac_version }}-ae${{ steps.framac.outputs.alt_ergo_version }}-ml${{ steps.framac.outputs.ocaml_version }}-
+
+      - name: make verify
+        run: |
+          set -euo pipefail
+          eval "$(opam env --switch=${{ steps.framac.outputs.switch }})"
+          make verify
+
+      # Inspection, not decoration. `make verify` prints a summary and the
+      # baseline diff; these are the artifacts you need when it fails and the
+      # log line is not enough: the full prover output with per-goal timings,
+      # and the goal list the diff was taken against.
+      - name: Upload prover logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wp-logs
+          path: |
+            build/verify.log
+            build/wp-unproved.txt
+            .ci/wp-known-unproved.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      # A readable verdict on the run's summary page, so the common questions
+      # ("how many are open", "did the set change") are answered without
+      # downloading an artifact or scrolling the log.
+      - name: Summarize
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## Frama-C WP"
+            echo
+            if [ -f build/verify.log ]; then
+              grep -E 'Proved goals:' build/verify.log | sed 's/^/    /' || true
+              echo
+              echo "### Open goals (expected; see .ci/wp-known-unproved.txt)"
+              echo '```'
+              grep -oE 'typed_[a-z]+_[a-zA-Z_0-9]+' build/wp-unproved.txt 2>/dev/null \
+                | sed -E 's/^typed_[a-z]+_//' | sort -u || echo '(none)'
+              echo '```'
+              echo
+              echo "Timeout budget: ${WP_TIMEOUT}s per goal."
+            else
+              echo "No prover log: the run failed before Frama-C produced one."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

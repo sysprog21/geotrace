@@ -1,0 +1,7 @@
+unproved typed_cast_geotrace_copy_span_call_memcpy_requires_valid_src
+unproved typed_cast_packet_decode_ipv4_call_geotrace_copy_cstr_requires_2
+unproved typed_cast_ring_create_call_xmalloc_requires
+unproved typed_cast_ring_create_ensures
+unproved typed_cast_ring_create_exits
+unproved typed_cast_ring_create_terminates_part2
+total Proved goals:  354 / 360

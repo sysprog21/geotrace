@@ -32,7 +32,7 @@ $(eval $(call add-test,ring,$(OUT)/ring.o $(OUT)/oom.o))
 
 # IP filter boundaries. Includes geo.c to reach IPV4_BLOCKED_RANGES and assert
 # its own table still matches, so it must not also link geo.o.
-$(eval $(call add-test,ip-filter,$(OUT)/oom.o))
+$(eval $(call add-test,ip-filter,$(OUT)/oom.o $(OUT)/geo-http.o))
 
 # Equirectangular projection and braille encoding.
 $(eval $(call add-test,projection,$(WORLD_MAP_DEPS)))
@@ -43,20 +43,46 @@ $(braille_TEST_TARGET): LDFLAGS += $(WORLD_MAP_LIBS)
 # Input parsers. Includes geo.c and platform.c directly to reach their statics
 # rather than widening the public API for tests; links cli.o for the public
 # cli_normalize_interfaces, plus its theme.o/oom.o dependencies.
-$(eval $(call add-test,parsers,$(OUT)/cli.o $(OUT)/theme.o $(OUT)/oom.o))
+$(eval $(call add-test,parsers,$(OUT)/geo-http.o $(OUT)/cli.o $(OUT)/theme.o $(OUT)/oom.o))
 
 # The sudo re-exec command line. Includes cli.c directly to reach the static
 # argv builder, so it must NOT also link cli.o; platform.o is needed for
 # platform_iface_append, which cli.c calls.
 $(eval $(call add-test,cli,$(OUT)/theme.o $(OUT)/platform.o $(OUT)/oom.o))
 
+# IPv4 frame decode from the capture path. Links packet-decode.o rather than
+# including pcap-source.c: that file is wrapped in "#if HAVE_PCAP", so this test
+# runs on a box with no libpcap, which is the point of splitting the decode out.
+$(eval $(call add-test,packet-decode,$(OUT)/packet-decode.o $(OUT)/oom.o))
+
 # Resolver pipeline stage: cache-only lookups, so no network in the test.
-$(eval $(call add-test,resolver,$(OUT)/resolver.o $(OUT)/geo.o $(OUT)/ring.o $(OUT)/oom.o))
+$(eval $(call add-test,resolver,$(OUT)/resolver.o $(OUT)/geo.o $(OUT)/geo-http.o \
+                                $(OUT)/ring.o $(OUT)/oom.o))
 
 # BPF program vs IPV4_BLOCKED_RANGES agreement. Needs libpcap to compile the
 # filter, so it only exists when live capture is enabled.
 ifeq ($(ENABLE_PCAP),1)
-$(eval $(call add-test,bpf-filter,$(OUT)/ring.o $(OUT)/oom.o))
+$(eval $(call add-test,bpf-filter,$(OUT)/ring.o $(OUT)/oom.o $(OUT)/packet-decode.o \
+                                 $(OUT)/geo-http.o))
+endif
+
+# First coverage for main.c and ui.c. Includes both as sources to reach their
+# statics (the privilege policy, the CSV buffer builder, the pure time and
+# animation helpers), so it must NOT also link main.o or ui.o.
+$(eval $(call add-test,runtime-policy,$(WORLD_MAP_DEPS) $(OUT)/cli.o \
+                                      $(OUT)/theme.o $(OUT)/platform.o \
+                                      $(OUT)/geo.o $(OUT)/geo-http.o \
+                                      $(OUT)/resolver.o $(OUT)/ring.o \
+                                      $(OUT)/demo-source.o $(OUT)/packet-decode.o))
+$(runtime-policy_TEST_TARGET): LDFLAGS += $(WORLD_MAP_LIBS)
+
+# main.c calls pcap_source_create/destroy when live capture is compiled in, so
+# the test needs the same object the binary links. Adding it as a prerequisite
+# is enough: test-framework links with $^, not a fixed list, and mk/config.mk
+# already puts $(PCAP_LIBS) in the global LDFLAGS -- repeating it here only
+# earns an "ignoring duplicate libraries: -lpcap" warning from the linker.
+ifeq ($(ENABLE_PCAP),1)
+$(runtime-policy_TEST_TARGET): $(OUT)/pcap-source.o
 endif
 
 tests: $(TEST_TARGETS)

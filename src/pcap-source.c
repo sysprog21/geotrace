@@ -3,6 +3,7 @@
 #if HAVE_PCAP
 
 #include "geotrace/oom.h"
+#include "geotrace/packet-decode.h"
 #include "geotrace/util.h"
 
 #include <pcap.h>
@@ -95,8 +96,9 @@ static void report_capture_error(pcap_source_t *p,
     status_event s = {0};
     s.level = GEOTRACE_STATUS_ERROR;
     clock_gettime(CLOCK_MONOTONIC, &s.created_at);
-    /* "No capture on" covers both callers. "Capture stopped" would be a lie
-     * for an interface that never started in the first place.
+
+    /* "No capture on" covers both callers. "Capture stopped" would be a lie for
+     * an interface that never started in the first place.
      */
     snprintf(s.message, sizeof(s.message), "No capture on %s: %s", ifname,
              reason);
@@ -131,33 +133,28 @@ static int link_offset_for_dlt(int dlt)
 
 /* packet handler */
 
+/* The bounds checking and IPv4 decode live in packet-decode.c so they can be
+ * tested without libpcap; see tests/test-packet-decode.c. This handler is left
+ * with the pcap-shaped glue only.
+ *
+ * hdr->len, not hdr->caplen, is passed as the wire length: models.h defines
+ * size as the packet's total on-the-wire length, and PCAP_SNAPLEN truncates
+ * caplen at 256 bytes, which would silently report every full-MTU frame as a
+ * 256-byte one.
+ */
 static void on_packet(u_char *user,
                       const struct pcap_pkthdr *hdr,
                       const u_char *bytes)
 {
     capture_thread *ct = (capture_thread *) user;
 
-    if ((size_t) hdr->caplen <= (size_t) ct->link_offset)
+    packet_event pkt;
+    if (!packet_decode_ipv4(bytes, (size_t) hdr->caplen,
+                            (size_t) ct->link_offset, hdr->len, ct->ifname,
+                            &pkt))
         return;
 
-    const u_char *ip = bytes + ct->link_offset;
-    size_t ip_len = hdr->caplen - (size_t) ct->link_offset;
-    if (ip_len < 20)
-        return;
-    if ((ip[0] >> 4) != 4)
-        return; /* Capture path accepts IPv4 packets only */
-
-    packet_event pkt = {0};
-    memcpy(&pkt.src_ip_be, ip + 12, 4);
-    memcpy(&pkt.dst_ip_be, ip + 16, 4);
-
-    /* hdr->len, not hdr->caplen: models.h defines size as the packet's total
-     * wire length, and PCAP_SNAPLEN truncates caplen at 256 bytes, which would
-     * silently report every full-MTU frame as a 256-byte one.
-     */
-    pkt.size = hdr->len;
-    pkt.ip_protocol = ip[9];
-    geotrace_copy_cstr(pkt.interface, sizeof(pkt.interface), ct->ifname);
+    /* Stamped here rather than inside the decoder: see packet-decode.h. */
     clock_gettime(CLOCK_MONOTONIC, &pkt.created_at);
 
     ring_put_latest(ct->parent->out_ring, &pkt);

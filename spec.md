@@ -45,7 +45,8 @@ make debug          # ASan + UBSan
 make sanitize       # ASan + UBSan build, then TSan tests
 make tests          # unit tests
 make check          # tests + 3-second --demo smoke run
-make format         # clang-format -i over src/ include/ tests/
+make verify         # Frama-C/WP over the ACSL contracts (needs frama-c)
+make indent         # clang-format -i over src/ include/ tests/
 ```
 
 ## Naming conventions
@@ -74,7 +75,7 @@ uint32_t ip_host;   /* host-order via ntohl, used for cache keys and gates */
 ## Formatting
 
 Formatting is enforced by `.clang-format` (Chromium base, customized). Run
-`make format` rather than hand-aligning. The shape:
+`make indent` rather than hand-aligning. The shape:
 
 - 4-space indent, no tabs (`UseTab: Never`, `IndentWidth: 4`).
 - Linux-style braces: function opening braces on a new line; control-structure
@@ -337,8 +338,15 @@ Module ownership in `src/`:
   (Linux `ip` / macOS `getifaddrs`).
 - `geo.c` — `is_public_ipv4`, geo cache, raw-TCP HTTP/1.1 client against
   `ip-api.com`.
+- `geo-http.c` — HTTP status parsing and JSON extraction for the above,
+  split out because it is the part that reads bytes a remote party chose
+  and it should be testable without a socket. Header is `src/geo-http.h`:
+  internal to `src/`, not public API.
 - `demo-source.c` / `pcap-source.c` — push-API packet sources behind
   `struct packet_source`.
+- `packet-decode.c` — IPv4 header decode and its bounds checks. Separate
+  from `pcap-source.c` so it can be tested without libpcap: that file is
+  wrapped in `#if HAVE_PCAP` and its handler takes a `pcap_pkthdr`.
 - `world-map.c` — projection, braille glyph composition, static-layer
   cache, trajectories.
 - `ui.c` — `termios` raw mode, double-buffered ANSI render, status

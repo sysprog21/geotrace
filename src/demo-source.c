@@ -30,6 +30,9 @@ static const demo_entry EXAMPLES[] = {
  */
 static const char *DEMO_IFACE_NAMES[] = {"demo", NULL};
 
+/* Upper bound on the pacing interval; see demo_source_create. */
+#define DEMO_MAX_INTERVAL_SECONDS 3600.0
+
 typedef struct {
     struct packet_source base;
     pthread_t thread;
@@ -62,8 +65,8 @@ static void *demo_thread_main(void *arg)
     /* Sleep in the interval, but check the stop flag at coarse granularity
      * (every 50ms). Avoids leaving the program hanging in nanosleep on Ctrl-C.
      */
-    const long interval_ns = (long) (d->interval_seconds * 1e9);
-    const long step_ns = 50L * 1000L * 1000L;
+    const int64_t interval_ns = (int64_t) (d->interval_seconds * 1e9);
+    const int64_t step_ns = 50 * 1000 * 1000;
 
     while (!geotrace_flag_is_raised(d->stop_flag)) {
         const demo_entry *e =
@@ -79,11 +82,14 @@ static void *demo_thread_main(void *arg)
 
         ring_put_latest(d->out_ring, &pkt);
 
-        long remaining = interval_ns;
+        int64_t remaining = interval_ns;
         while (remaining > 0 && !geotrace_flag_is_raised(d->stop_flag)) {
-            long chunk = remaining < step_ns ? remaining : step_ns;
-            struct timespec ts = {.tv_sec = chunk / 1000000000L,
-                                  .tv_nsec = chunk % 1000000000L};
+            /* Bounded by step_ns, so both fields fit whatever width time_t and
+             * tv_nsec have.
+             */
+            int64_t chunk = remaining < step_ns ? remaining : step_ns;
+            struct timespec ts = {.tv_sec = (time_t) (chunk / 1000000000),
+                                  .tv_nsec = (long) (chunk % 1000000000)};
             nanosleep(&ts, NULL);
             remaining -= chunk;
         }
@@ -138,7 +144,20 @@ struct packet_source *demo_source_create(double interval_seconds)
     d->base.interfaces = demo_source_interfaces;
     d->base.interface_count = demo_source_iface_count;
 
+    /* Clamped at both ends, not just the low one. The "> 0.0" test already
+     * rejects NaN and non-positive values, but demo_thread_main converts
+     * interval_seconds * 1e9 to an integer, and that conversion is undefined
+     * for a value the type cannot hold -- 1e300 here would reach it as
+     * infinity. Only caller passes a literal today; this is a public entry
+     * point in source.h, so it should not depend on that. One hour is far past
+     * any useful demo pacing, and 3600 * 1e9 = 3.6e12 sits about six orders
+     * inside int64_t. It does NOT fit a 32-bit long, which is why
+     * demo_thread_main counts in int64_t rather than long -- the same reason
+     * geotrace_elapsed_ns does.
+     */
     d->interval_seconds = interval_seconds > 0.0 ? interval_seconds : 0.75;
+    if (d->interval_seconds > DEMO_MAX_INTERVAL_SECONDS)
+        d->interval_seconds = DEMO_MAX_INTERVAL_SECONDS;
     d->src_ip_be = inet_addr("192.168.1.5");
     return &d->base;
 }

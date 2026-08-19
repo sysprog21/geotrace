@@ -6,8 +6,8 @@
  * must come after anything the caller passed, and a bare "--" must not be
  * forwarded ahead of them. Both rules have been broken once already.
  *
- * cli.c is included directly to reach the static builder, so this test does
- * not link cli.o.
+ * cli.c is included directly to reach the static builder, so this test does not
+ * link cli.o.
  */
 
 #include "cli.c"
@@ -37,6 +37,7 @@ static size_t build(char **out, int argc, char **argv, bool with_iface)
     size_t n = 1;
     while (out[n])
         n++;
+
     /* The builder must never write past what the capacity promised: n slots
      * plus the terminator.
      */
@@ -75,8 +76,8 @@ static void test_plain(void)
     expect_slot(got, 4, "--green");
 }
 
-/* A caller's own drop flags are refused outright rather than out-ordered:
- * these decide who the UI runs as, and both spellings must be caught.
+/* A caller's own drop flags are refused outright rather than out-ordered: these
+ * decide who the UI runs as, and both spellings must be caught.
  */
 static void test_caller_drop_flags_refused(void)
 {
@@ -90,8 +91,8 @@ static void test_caller_drop_flags_refused(void)
     assert(!has_caller_drop_flag(1, clean));
 }
 
-/* A trailing "--" keeps its meaning, and nothing generated follows it: after
- * an option terminator the root-side parse would read a flag as a positional
+/* A trailing "--" keeps its meaning, and nothing generated follows it: after an
+ * option terminator the root-side parse would read a flag as a positional
  * argument and refuse to start.
  */
 static void test_option_terminator_ends_the_line(void)
@@ -104,9 +105,9 @@ static void test_option_terminator_ends_the_line(void)
     expect_slot(got, n - 1, "--");
 }
 
-/* "-i --" is the other reading of the same two characters: getopt takes "--"
- * as the argument to -i. Removing it would hand -i the next word instead, and
- * the next word is a generated flag.
+/* "-i --" is the other reading of the same two characters: getopt takes "--" as
+ * the argument to -i. Removing it would hand -i the next word instead, and the
+ * next word is a generated flag.
  */
 static void test_terminator_as_option_argument(void)
 {

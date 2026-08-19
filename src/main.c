@@ -150,14 +150,19 @@ static bool resolve_target_user(const cli_options *opts,
 
 /* Gate between cli_ensure_capture_privileges and starting the pipeline: we must
  * be root to capture, but must not still be root when the UI runs.
- * Returns false after printing the reason.
+ * Returns false after printing the reason. The policy, with the effective UID
+ * passed in rather than read from the process. Splitting it this way is what
+ * lets tests reach the root-only branch below: as a single function reading
+ * geteuid(), the refusal that matters most here is unreachable from an
+ * unprivileged test run, and a test that cannot reach it silently passes when
+ * the branch is deleted.
  */
-static bool capture_privileges_ok(const cli_options *opts)
+static bool capture_privileges_ok_for(const cli_options *opts, uid_t euid)
 {
     if (opts->demo)
         return true;
 
-    if (geteuid() != 0) {
+    if (euid != 0) {
         fprintf(stderr,
                 "geotrace: live capture needs root privileges. "
                 "Pass --demo for synthetic traffic.\n");
@@ -179,6 +184,11 @@ static bool capture_privileges_ok(const cli_options *opts)
         return false;
     }
     return true;
+}
+
+static bool capture_privileges_ok(const cli_options *opts)
+{
+    return capture_privileges_ok_for(opts, geteuid());
 }
 
 static void destroy_source(bool demo_mode, struct packet_source *source)
@@ -389,47 +399,77 @@ static void emit_listening_banner(struct ring *statuses,
     emit_status(statuses, GEOTRACE_STATUS_INFO, "%s", line);
 }
 
+/* Modes that print something and leave.
+ *
+ * Returns true when the process is done, with the exit status in "code"; false
+ * means carry on into the capture run.
+ */
+static bool handle_early_exit(char **argv,
+                              const cli_options *opts,
+                              cli_status st,
+                              int *code)
+{
+    if (st == CLI_BAD_USAGE) {
+        cli_print_help(stderr, argv[0]);
+        *code = 2;
+        return true;
+    }
+    if (st == CLI_EXIT_SUCCESS) {
+        if (opts->show_help)
+            cli_print_help(stdout, argv[0]);
+        if (opts->show_version)
+            cli_print_version(stdout);
+        *code = 0;
+        return true;
+    }
+    if (opts->list_interfaces) {
+        *code = run_list_interfaces();
+        return true;
+    }
+    return false;
+}
+
+/* Select interfaces, re-exec through sudo if that is how privileges are
+ * obtained, and confirm the result is safe to run the UI under.
+ *
+ * Returns false when the caller should exit non-zero.
+ *
+ * The ordering here is load-bearing, which is the reason it is one function
+ * rather than inline steps: whether the user chose interfaces has to be latched
+ * *before* detection overwrites interface_count, because only an auto-detected
+ * set needs forwarding across the re-exec. A user-supplied -i is already in the
+ * argv handed to execv, and forwarding it twice would let the later occurrence
+ * win in getopt.
+ */
+static bool prepare_capture(int argc, char **argv, cli_options *opts)
+{
+    const bool user_chose_interfaces = opts->interface_count > 0;
+    if (!user_chose_interfaces && !opts->demo) {
+        opts->interface_count = platform_detect_interfaces(
+            opts->interfaces, GEOTRACE_MAX_INTERFACES);
+    }
+
+    char detected_csv[GEOTRACE_MAX_INTERFACES * (GEOTRACE_IFACE_LEN + 1)];
+    detected_csv[0] = '\0';
+    if (!user_chose_interfaces && !opts->demo)
+        format_detected_interfaces(detected_csv, sizeof(detected_csv), opts);
+
+    cli_ensure_capture_privileges(argc, argv, opts, detected_csv);
+    /* Execution continues only for root capture, --demo, or --no-auto-sudo. */
+
+    return capture_privileges_ok(opts);
+}
+
 int main(int argc, char **argv)
 {
     cli_options opts = {0};
     cli_status st = cli_parse(argc, argv, &opts);
-    if (st == CLI_BAD_USAGE) {
-        cli_print_help(stderr, argv[0]);
-        return 2;
-    }
-    if (st == CLI_EXIT_SUCCESS) {
-        if (opts.show_help)
-            cli_print_help(stdout, argv[0]);
-        if (opts.show_version)
-            cli_print_version(stdout);
-        return 0;
-    }
 
-    if (opts.list_interfaces)
-        return run_list_interfaces();
+    int code = 0;
+    if (handle_early_exit(argv, &opts, st, &code))
+        return code;
 
-    /* Detect interfaces if -i wasn't given. Remember which case we're in
-     * *before* detection overwrites interface_count: only an auto-detected set
-     * has to be forwarded across the sudo re-exec, since a user-supplied -i is
-     * already in the argv we hand to execv.
-     */
-    const bool user_chose_interfaces = opts.interface_count > 0;
-    if (!user_chose_interfaces && !opts.demo) {
-        opts.interface_count = platform_detect_interfaces(
-            opts.interfaces, GEOTRACE_MAX_INTERFACES);
-    }
-
-    /* sudo re-exec when needed. Forward the auto-detected interface set so the
-     * post-sudo process keeps the same selection.
-     */
-    char detected_csv[GEOTRACE_MAX_INTERFACES * (GEOTRACE_IFACE_LEN + 1)];
-    detected_csv[0] = '\0';
-    if (!user_chose_interfaces && !opts.demo)
-        format_detected_interfaces(detected_csv, sizeof(detected_csv), &opts);
-    cli_ensure_capture_privileges(argc, argv, &opts, detected_csv);
-    /* Execution continues only for root capture, --demo, or --no-auto-sudo. */
-
-    if (!capture_privileges_ok(&opts))
+    if (!prepare_capture(argc, argv, &opts))
         return 1;
 
     install_signals();
