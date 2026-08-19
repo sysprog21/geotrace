@@ -8,6 +8,7 @@
  * memcpy tells a reader nothing.
  */
 #define IPV4_MIN_HEADER_LEN 20
+#define IPV4_MIN_IHL 5 /* header length in 32-bit words */
 #define IPV4_OFF_PROTOCOL 9
 #define IPV4_OFF_SRC 12
 #define IPV4_OFF_DST 16
@@ -40,6 +41,14 @@ bool packet_decode_ipv4(const unsigned char *bytes,
      * version nibble is known to be inside the capture.
      */
     if ((ip[0] >> 4) != 4)
+        return false;
+
+    /* IHL below 5 describes a header shorter than the fixed fields it must
+     * contain, so bytes 12..19 are not addresses at all. They are inside the
+     * capture, so reading them is safe, but they would be handed to the geo
+     * resolver as if a hostile sender had not chosen them.
+     */
+    if ((ip[0] & 0x0f) < IPV4_MIN_IHL)
         return false;
 
     packet_event pkt = {0};

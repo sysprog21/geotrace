@@ -75,6 +75,27 @@ static void test_rejects_non_ipv4(void)
     }
 }
 
+/* Version 4 with IHL < 5: long enough to read, but not a real IPv4 header. */
+static void test_rejects_bad_ihl(void)
+{
+    unsigned char frame[ETH_HDR + IPV4_HDR];
+    packet_event pkt;
+
+    for (uint8_t ihl = 0; ihl < 5; ihl++) {
+        memset(frame, 0, sizeof(frame));
+        frame[ETH_HDR] = (unsigned char) (4 << 4 | ihl);
+        assert(!packet_decode_ipv4(frame, sizeof(frame), ETH_HDR, 1500, "en0",
+                                   &pkt));
+    }
+    /* IHL 5 and above are accepted. */
+    for (uint8_t ihl = 5; ihl < 16; ihl++) {
+        memset(frame, 0, sizeof(frame));
+        frame[ETH_HDR] = (unsigned char) (4 << 4 | ihl);
+        assert(packet_decode_ipv4(frame, sizeof(frame), ETH_HDR, 1500, "en0",
+                                  &pkt));
+    }
+}
+
 /* The bounds cases. Each buffer is exactly caplen bytes so that any read past
  * the captured region lands in an ASan red zone instead of adjacent stack.
  */
@@ -175,6 +196,7 @@ int main(void)
 {
     test_accepts_well_formed_ipv4();
     test_rejects_non_ipv4();
+    test_rejects_bad_ihl();
     test_rejects_short_frames();
     test_rejects_oversized_link_offset();
     test_zero_link_offset();
