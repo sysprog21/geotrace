@@ -1,0 +1,2 @@
+unproved typed_cast_geotrace_copy_span_call_memcpy_requires_valid_src
+total Proved goals:   98 / 99

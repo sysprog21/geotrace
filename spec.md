@@ -45,6 +45,7 @@ make debug          # ASan + UBSan
 make sanitize       # ASan + UBSan build, then TSan tests
 make tests          # unit tests
 make check          # tests + 3-second --demo smoke run
+make verify         # Frama-C/WP over the ACSL contracts (needs frama-c)
 make indent         # clang-format -i over src/ include/ tests/
 ```
 

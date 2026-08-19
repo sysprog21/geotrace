@@ -56,6 +56,18 @@ static inline bool geotrace_flag_take(geotrace_flag *f)
  */
 typedef _Atomic size_t geotrace_counter;
 
+/* The four helpers below carry ACSL frame contracts so WP can bound what a
+ * counter update touches; without them a caller's whole heap is assumed
+ * clobbered and every ring invariant dies at the first bump. The bodies are C11
+ * atomic intrinsics, which WP's memory models do not interpret — their
+ * correctness is an obligation on the C11 memory model, not on WP, so the
+ * contracts are stated for callers and the bodies are excluded from proof.
+ */
+
+/*@ requires \valid(c);
+    assigns *c;
+    ensures *c == 0;
+ */
 static inline void geotrace_counter_init(geotrace_counter *c)
 {
     /* xcalloc-zeroed storage is not portably a valid atomic object; atomic_init
@@ -64,11 +76,20 @@ static inline void geotrace_counter_init(geotrace_counter *c)
     atomic_init(c, (size_t) 0);
 }
 
+/*@ requires \valid(c);
+    assigns *c;
+ */
 static inline void geotrace_counter_bump(geotrace_counter *c)
 {
     atomic_fetch_add_explicit(c, (size_t) 1, memory_order_relaxed);
 }
 
+/* \valid_read, not \valid: this only loads, so demanding write access would
+ * make the contract stricter than the function.
+ */
+/*@ requires \valid_read(c);
+    assigns \nothing;
+ */
 static inline size_t geotrace_counter_read(geotrace_counter *c)
 {
     return atomic_load_explicit(c, memory_order_relaxed);
@@ -78,10 +99,15 @@ static inline size_t geotrace_counter_read(geotrace_counter *c)
  * Takes no lock, so concurrent producers genuinely race on it.
  *
  * The strong form cannot fail spuriously, so every failure means another thread
- * moved the counter and reloaded "prev" with a strictly larger value: the loop
- * provably terminates rather than relying on implementation quality. The weak
- * form would emit tighter code on LL/SC ISAs, but this runs only when the
- * watermark actually moves, which after warmup is almost never.
+ * moved the counter and reloaded "prev" with a strictly larger value, which is
+ * why the loop terminates. That is a hand argument, not a proof: this function
+ * is outside the verified set and the loop carries no invariant or variant, so
+ * nothing here checks it. The weak form would emit tighter code on LL/SC ISAs,
+ * but this runs only when the watermark actually moves, which after warmup is
+ * almost never.
+ */
+/*@ requires \valid(c);
+    assigns *c;
  */
 static inline void geotrace_counter_raise_to(geotrace_counter *c, size_t v)
 {
