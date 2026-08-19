@@ -132,6 +132,14 @@ static void test_geo_http_parse_status_code(void)
     expect_status("HTTP/1.1x200 OK", -1);
     expect_status("HTTP/1.1 2O0 OK", -1);
     expect_status("HTTP/1.1 -12 OK", -1);
+
+    /* Three digits are not enough: there is no status below 100, so a code
+     * with a leading zero is not a status code.
+     */
+    expect_status("HTTP/1.1 042 x", -1);
+    expect_status("HTTP/1.1 000 x", -1);
+    expect_status("HTTP/1.1 099 x", -1);
+    expect_status("HTTP/1.1 100 Continue\r\n", 100);
 }
 
 /* classify_status */

@@ -23,9 +23,11 @@
 /* First byte after the "\r\n\r\n" header terminator, or NULL if absent. */
 const char *geo_http_find_body(const char *response);
 
-/* Status code from an "HTTP/1.x NNN ..." status line, or -1 if malformed. All
- * three code characters must be digits: without that a malformed line yields an
- * arbitrary int that would slip through the 4xx/5xx classification.
+/* Status code from an "HTTP/1.x NNN ..." status line, or -1 if malformed.
+ * All three code characters must be digits and the first must not be '0':
+ * without that a malformed line yields an arbitrary int that would slip
+ * through the 4xx/5xx classification, and the result would not be a real
+ * status code at all.
  */
 int geo_http_parse_status_code(const char *response);
 

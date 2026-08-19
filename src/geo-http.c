@@ -23,6 +23,11 @@ const char *geo_http_find_body(const char *response)
  * Returns -1 unless all three code characters are digits — without that check a
  * malformed status line yields an arbitrary int that slips through the 4xx/5xx
  * classification in http_lookup.
+ *
+ * A leading '0' is rejected too, so the result is -1 or a real 100..999 code
+ * and never something like 42. RFC 9110 has no status below 100. No behaviour
+ * changes at the only call site: geo_http_classify_status maps both 42 and -1
+ * to GEO_HTTP_TRANSIENT.
  */
 int geo_http_parse_status_code(const char *response)
 {
@@ -40,6 +45,8 @@ int geo_http_parse_status_code(const char *response)
         if (!isdigit((unsigned char) response[i]))
             return -1;
     }
+    if (response[9] == '0')
+        return -1;
     return (response[9] - '0') * 100 + (response[10] - '0') * 10 +
            (response[11] - '0');
 }
