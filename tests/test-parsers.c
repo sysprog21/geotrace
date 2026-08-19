@@ -73,6 +73,17 @@ static void test_geo_json_get_string(void)
     expect_json_fail("{\"c\":\"a\\u\"}", "c");
     expect_json_fail("{\"c\":\"a\\uZZZZ\"}", "c");
 
+    /* That failure path writes into "out" before it bails, so it must leave a
+     * terminated buffer behind. A caller with an unzeroed buffer would
+     * otherwise read off the end of it.
+     */
+    char partial[8];
+    memset(partial, 'Z', sizeof(partial));
+    assert(!geo_json_get_string("{\"c\":\"abc\\u12\"}", "c", partial,
+                                sizeof(partial)));
+    assert(memchr(partial, '\0', sizeof(partial)) != NULL);
+    assert(strcmp(partial, "abc") == 0);
+
     /* Control bytes from the wire must not reach the terminal verbatim. */
     expect_json("{\"c\":\"a\x1b[31mb\"}", "c", "a [31mb");
     expect_json(

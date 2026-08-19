@@ -189,10 +189,19 @@ bool geo_json_get_string(const char *json,
              * digits; a truncated "\u" near the end of a string (e.g. "\u12")
              * would otherwise let p += 6 walk past the closing quote into the
              * next JSON value.
+             *
+             * Terminate before bailing: by the time a bad escape is reached the
+             * loop has already copied everything before it into "out", so
+             * returning straight away would hand back a buffer that was written
+             * but never NUL-terminated. Callers that pre-zero their buffer
+             * survive that; one that does not gets an unbounded read.
              */
             for (int k = 2; k <= 5; k++) {
-                if (!isxdigit((unsigned char) p[k]))
+                if (!isxdigit((unsigned char) p[k])) {
+                    if (cap)
+                        out[i < cap ? i : cap - 1] = '\0';
                     return false;
+                }
             }
             p += 6;
             if (i + 1 < cap)
