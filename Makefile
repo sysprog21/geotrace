@@ -114,9 +114,9 @@ check: all tests
 	$(Q)$(call notice, [OK])
 
 # Deductive verification (Frama-C/WP) of the ACSL in include/geotrace/util.h,
-# src/ring.c, src/packet-decode.c and src/geo-http.c. Optional: Frama-C is not a build dependency, so this is not
-# wired into `check`. Each file's header comment records what is proved, what is
-# assumed, and what is still open.
+# src/ring.c, src/packet-decode.c and src/geo-http.c. Optional: Frama-C is not
+# a build dependency, so this is not wired into `check`. Each file's header
+# comment records what is proved, what is assumed, and what is still open.
 FRAMA_C ?= frama-c
 
 # One process over all of VERIFY_SRCS: every invocation reparses the whole libc
@@ -162,13 +162,14 @@ space := $(empty) $(empty)
 # ~2.5x margin. That margin is machine-dependent -- on a slower or loaded box
 # that goal gets cut off, appears in the baseline diff as a new unproved name,
 # and fails the build for a reason in the environment. Raise WP_TIMEOUT there
-# rather than editing the baseline.
+# (CI uses 90) rather than editing the baseline.
 WP_TIMEOUT ?= 15
 WP_PAR     ?= $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
 # WP caches verdicts under .frama-c/, which is why a warm run is several times
-# faster; parsing is ~1s, so the rest is prover time. Do not "improve" it with
-# -wp-cache-dir: measured markedly slower than the default session cache.
+# faster; parsing is ~1s, so the rest is prover time. CI caches that directory.
+# Do not "improve" it with -wp-cache-dir: measured markedly slower than the
+# default session cache (warm ~12s to ~21-28s).
 
 # Frama-C exits 0 with goals unproved, so without this the target would report
 # success having proved nothing. The baseline pins the unproved goals by name
@@ -193,10 +194,10 @@ WP_BASELINE := .ci/wp-known-unproved.txt
 # provers run every unprovable goal to the full budget: cold 54s to 98s, warm
 # 16s to 60s. Wrong side of that trade.
 #
-# Naming it also makes the baseline reproducible, since WP's default is whatever why3 detected
-# on the machine, so a developer box with extra provers installed could reach a
-# different verdict than CI and fail the diff for a reason in the environment
-# rather than the code.
+# Naming it also makes the baseline reproducible: WP's default set is whatever
+# why3 detected on the machine, so a developer box with extra provers installed
+# could reach a different verdict than CI and fail the diff for a reason in the
+# environment rather than the code.
 #
 # Deferred (=, not :=) so the WP_PAR probe forks only under `make verify`, not
 # on every `make`, `make clean`, and tab-completion.
@@ -213,13 +214,18 @@ verify-run: | $(OUT)
 	$(Q)$(FRAMA_C) -cpp-extra-args="-Iinclude" $(VERIFY_SRCS) $(WPFLAGS) \
 	    -wp-fct $(subst $(space),$(comma),$(strip $(VERIFY_FCTS))) \
 	    >$(OUT)/verify.log 2>&1 || { cat $(OUT)/verify.log; exit 1; }
-	@# Filters the terminal copy only; $(OUT)/verify.log keeps every line, so
-	@# the full log is what gets read when something went wrong.
+	@# Filters the terminal copy only; $(OUT)/verify.log keeps every line. That
+	@# is deliberate, not an oversight: the log is what verify.yml uploads as
+	@# wp-logs, and an artifact exists to be read when something went wrong, so
+	@# it should not be the lossy copy. The goal extraction below is unaffected
+	@# either way -- warnings never match its pattern.
 	@#
-	@# What is filtered: WP models void * as char *, so memcpy on typed fields
-	@# reports a pointer mismatch. Same artifact throughout and not fixable
-	@# here -- memcpy on a typed field is correct C, and C's implicit void *
-	@# conversion warns identically (measured).
+	@# What is filtered: WP models void * as char *, so allocating the ring
+	@# struct and memcpy on typed fields report a pointer mismatch. Same
+	@# artifact throughout and not fixable here -- memcpy on a typed field is
+	@# correct C, and C's implicit void * conversion warns identically
+	@# (measured). Instances the code could honestly remove already went; the
+	@# ring slab is char * now.
 	@#
 	@# Matched as the whole two-line message: WP prints uncategorized warnings
 	@# as a "file:line: Warning:" header plus an indented body, so a
@@ -229,9 +235,9 @@ verify-run: | $(OUT)
 	    $(OUT)/verify.log
 	@# Goal NAME only, never WP's status word. Timeout and Failure both mean
 	@# "not proved", but which one appears depends on the budget: at the local
-	@# 15s Alt-Ergo is cut off and reports Timeout, while at a larger budget it
-	@# reaches a verdict and reports Failure. Pinning the word made the baseline
-	@# fail across machines for a difference that carries no information.
+	@# 15s Alt-Ergo is cut off and reports Timeout, while at CI's 90s it reaches
+	@# a verdict and reports Failure. Pinning the word made the baseline fail
+	@# across machines for a difference that carries no information.
 	$(Q){ sed -n 's/^\[wp\] \[[A-Za-z]*\] \(typed[a-zA-Z_0-9]*\).*/unproved \1/p' \
 	        $(OUT)/verify.log | sort -u; \
 	      sed -n 's/^\[wp\] \(Proved goals: *[0-9]* \/ [0-9]*\).*/total \1/p' \

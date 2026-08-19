@@ -1,0 +1,137 @@
+# Frama-C and Alt-Ergo ready for "make verify".
+#
+# Factored out of verify.yml the way elfuse does it: Actions has no other way to
+# share steps between jobs, and any future second consumer (a mutation gate, a
+# nightly full-scope run) would otherwise be a copy that drifts the first time
+# either side is touched.
+#
+# The caller still has to "eval $(opam env --switch=...)" in its own run steps,
+# because a composite action cannot export shell state to them. The switch name
+# comes back as an output so nothing spells it twice.
+#
+# Ubuntu rather than macOS: everything here is opam, and GitHub bills a macOS
+# minute at ten times a Linux one. geotrace's build matrix already covers macOS
+# for the things that are actually platform-specific (BPF, the libpcap probe);
+# WP is not one of them.
+name: Set up Frama-C
+description: Install Frama-C and the provers, from cache when the pins are unchanged
+
+inputs:
+  framac-version:
+    # Pinned rather than floating, and checked rather than assumed: this is the
+    # version .ci/wp-known-unproved.txt was recorded against. A proof that stops
+    # discharging on a newer analyzer is a real signal, so the pin makes the
+    # version an explicit decision rather than freezing it forever. Bumping any
+    # of the three is a cold opam build, since the cache key covers all of them.
+    description: Frama-C version to install
+    default: "33.0"
+  alt-ergo-version:
+    description: Alt-Ergo version to install
+    default: "2.6.3"
+  # No z3 input, on purpose. make verify runs Alt-Ergo alone and the Makefile
+  # records why, so installing a prover nothing uses is cost with no benefit --
+  # and not free cost: z3.4.13.0 depends on the system package
+  # python3-distutils, which ubuntu-24.04 does not have because Python 3.12
+  # dropped distutils, so adding it fails the job in depext. Add it back, with
+  # a version whose depexts resolve on the runner, if that experiment is wanted.
+  ocaml-version:
+    description: OCaml compiler for the switch
+    default: "4.14.1"
+  switch-name:
+    # One source for the name. It was spelled three times -- the create, the
+    # env eval, and the output verify.yml consumes -- with nothing tying them
+    # together, so a divergence would have verify.yml eval a switch that does
+    # not exist and fail at "make verify" rather than here.
+    description: opam switch name
+    default: frama-c-geotrace
+
+outputs:
+  switch:
+    description: The opam switch name to eval into
+    value: ${{ inputs.switch-name }}
+  framac_version:
+    description: The Frama-C version used by the action
+    value: ${{ inputs.framac-version }}
+  alt_ergo_version:
+    description: The Alt-Ergo version used by the action
+    value: ${{ inputs.alt-ergo-version }}
+  ocaml_version:
+    description: The OCaml version used by the action
+    value: ${{ inputs.ocaml-version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Point opam at a cacheable root
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "OPAMROOT=${{ github.workspace }}/.opam" >> "$GITHUB_ENV"
+        echo "OPAMCONFIRMLEVEL=unsafe-yes" >> "$GITHUB_ENV"
+
+    - name: Install opam
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y opam
+
+    # One key shared by every consumer, so a warm run costs a single restore.
+    # Keyed on all three pins: changing any one must change the key or the
+    # cache serves the previous analyzer, which is exactly the drift the pins
+    # exist to prevent.
+    # Restore and save are split deliberately. actions/cache saves in its post
+    # step even when the job failed, so a run that dies partway through the
+    # install below would store a switch with no Frama-C in it. The next run
+    # restores that, sees cache-hit, skips the install, and fails at
+    # "frama-c: not found" a long way from the cause. A separate save step
+    # cannot run unless the install before it succeeded.
+    - name: Compute the switch cache key
+      id: cachekey
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "key=opam-${{ runner.os }}-${{ runner.arch }}-${{ inputs.switch-name }}-framac${{ inputs.framac-version }}-ae${{ inputs.alt-ergo-version }}-ocaml${{ inputs.ocaml-version }}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore opam switch
+      id: opam-cache
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.OPAMROOT }}
+        key: ${{ steps.cachekey.outputs.key }}
+
+    - name: Install Frama-C and Alt-Ergo
+      if: steps.opam-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        opam init -y --bare --disable-sandboxing
+        opam switch create ${{ inputs.switch-name }} ${{ inputs.ocaml-version }}
+        eval "$(opam env --switch=${{ inputs.switch-name }})"
+        opam install -y \
+          frama-c.${{ inputs.framac-version }} \
+          alt-ergo.${{ inputs.alt-ergo-version }}
+
+    - name: Save opam switch
+      if: steps.opam-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ env.OPAMROOT }}
+        key: ${{ steps.cachekey.outputs.key }}
+
+    # Not decoration: why3 has to detect the provers before WP can call them,
+    # and a restored cache carries the switch but not necessarily that step's
+    # result. Printing the versions also puts the exact toolchain in the log
+    # next to any goal that changed verdict.
+    - name: Report the toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        eval "$(opam env --switch=${{ inputs.switch-name }})"
+        # "why3 config detect" prints each prover it found and the count, so
+        # there is nothing for a second listing to add. If one is ever wanted,
+        # the spelling is "why3 config list-provers": there is no
+        # "why3 --list-provers" option, and reaching for it fails the job after
+        # the toolchain has installed cleanly.
+        why3 config detect
+        frama-c -version
