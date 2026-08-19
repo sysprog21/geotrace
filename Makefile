@@ -113,10 +113,10 @@ check: all tests
 	}
 	$(Q)$(call notice, [OK])
 
-# Deductive verification (Frama-C/WP) of the ACSL in include/geotrace/util.h.
-# Optional: Frama-C is not a build dependency, so this is not wired into
-# `check`. Each file's header comment records what is proved and what is
-# assumed.
+# Deductive verification (Frama-C/WP) of the ACSL in include/geotrace/util.h
+# and src/ring.c. Optional: Frama-C is not a build dependency, so this is not
+# wired into `check`. Each file's header comment records what is proved, what is
+# assumed, and what is still open.
 FRAMA_C ?= frama-c
 
 # One process over all of VERIFY_SRCS: every invocation reparses the whole libc
@@ -128,9 +128,11 @@ FRAMA_C ?= frama-c
 # "_0" suffix, failures included), and adding resolver.c cost 100 goals and a
 # third of the cold run for no extra coverage, since the inlines are analyzed
 # whether or not a listed TU calls them.
-VERIFY_SRCS := src/packet-decode.c
+VERIFY_SRCS := src/ring.c src/packet-decode.c
 
-VERIFY_FCTS := geotrace_elapsed_ns,geotrace_abs_int,geotrace_min_int \
+VERIFY_FCTS := slot_at,take_locked,ring_put_latest,ring_take,ring_try_take \
+               ring_shutdown,ring_size,ring_create \
+               geotrace_elapsed_ns,geotrace_abs_int,geotrace_min_int \
                geotrace_max_int,geotrace_clamp_int,geotrace_clamp_double \
                geotrace_clamp01,geotrace_max_float \
                geotrace_copy_cstr,geotrace_copy_span
@@ -169,8 +171,12 @@ WP_BASELINE := .ci/wp-known-unproved.txt
 #                                pointer, so no check is lost.
 # pedantic-assigns stays ON: a contract that forgot its frame is a real defect.
 #
-# Alt-Ergo alone, and named rather than left to WP's default set: naming it
-# makes the baseline reproducible, since WP's default is whatever why3 detected
+# Alt-Ergo alone, and named rather than left to WP's default set. Adding Z3
+# closes one more goal (xmalloc's precondition in ring_create) but then BOTH
+# provers run every unprovable goal to the full budget: cold 54s to 98s, warm
+# 16s to 60s. Wrong side of that trade.
+#
+# Naming it also makes the baseline reproducible, since WP's default is whatever why3 detected
 # on the machine, so a developer box with extra provers installed could reach a
 # different verdict than CI and fail the diff for a reason in the environment
 # rather than the code.

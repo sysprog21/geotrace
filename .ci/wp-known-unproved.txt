@@ -1,2 +1,6 @@
 unproved typed_cast_geotrace_copy_span_call_memcpy_requires_valid_src
-total Proved goals:   98 / 99
+unproved typed_cast_ring_create_call_xmalloc_requires
+unproved typed_cast_ring_create_ensures
+unproved typed_cast_ring_create_exits
+unproved typed_cast_ring_create_terminates_part2
+total Proved goals:  303 / 308
