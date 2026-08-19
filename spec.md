@@ -337,6 +337,10 @@ Module ownership in `src/`:
   (Linux `ip` / macOS `getifaddrs`).
 - `geo.c` — `is_public_ipv4`, geo cache, raw-TCP HTTP/1.1 client against
   `ip-api.com`.
+- `geo-http.c` — HTTP status parsing and JSON extraction for the above,
+  split out because it is the part that reads bytes a remote party chose
+  and it should be testable without a socket. Header is `src/geo-http.h`:
+  internal to `src/`, not public API.
 - `demo-source.c` / `pcap-source.c` — push-API packet sources behind
   `struct packet_source`.
 - `world-map.c` — projection, braille glyph composition, static-layer

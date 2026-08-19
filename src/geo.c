@@ -1,13 +1,13 @@
 #include "geotrace/geo.h"
 
+#include "geo-http.h"
+
 #include "geotrace/oom.h"
 #include "geotrace/util.h"
 
 #include <arpa/inet.h>
-#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <math.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -414,14 +414,15 @@ static ssize_t send_all(int fd, const char *buf, size_t len)
  * Success requires the peer's EOF. The request says "Connection: close", so a
  * complete response always ends in one; anything shorter is a prefix, and
  * parsing a prefix would cache a half-read country name (or a body cut short
- * before the field that would have made it a miss) as if it were
- * authoritative. Reporting -1 sends those to the transient path, where they
- * are retried rather than remembered.
+ * before the field that would have made it a miss) as if it were authoritative.
+ * Reporting -1 sends those to the transient path, where they are retried rather
+ * than remembered.
  */
 static ssize_t recv_response(int fd, char *buf, size_t cap, int budget_ms)
 {
     if (!buf || cap == 0)
         return -1;
+
     /* FD_SET past FD_SETSIZE writes off the end of fd_set. dial_one already
      * refuses such a descriptor, but the check belongs here too now that this
      * function does its own FD_SET rather than inheriting the caller's
@@ -430,8 +431,8 @@ static ssize_t recv_response(int fd, char *buf, size_t cap, int budget_ms)
     if (fd < 0 || fd >= FD_SETSIZE)
         return -1;
 
-    /* No clock means no budget, and a read with no budget is the unbounded
-     * wait this function exists to prevent.
+    /* No clock means no budget, and a read with no budget is the unbounded wait
+     * this function exists to prevent.
      */
     struct timespec start;
     if (clock_gettime(CLOCK_MONOTONIC, &start) != 0)
@@ -451,6 +452,7 @@ static ssize_t recv_response(int fd, char *buf, size_t cap, int budget_ms)
         fd_set rset;
         FD_ZERO(&rset);
         FD_SET(fd, &rset);
+
         /* Round up so a sub-microsecond remainder cannot produce a zero
          * timeout, which select() reads as "poll and return immediately" and
          * would spin. The casts are explicit because time_t and suseconds_t are
@@ -472,9 +474,9 @@ static ssize_t recv_response(int fd, char *buf, size_t cap, int budget_ms)
         }
 
         /* MSG_DONTWAIT because a readable indication does not guarantee the
-         * recv completes: on a spurious wakeup the blocking call would park
-         * for a whole SO_RCVTIMEO past the budget. EAGAIN just sends us back
-         * to the deadline check.
+         * recv completes: on a spurious wakeup the blocking call would park for
+         * a whole SO_RCVTIMEO past the budget. EAGAIN just sends us back to the
+         * deadline check.
          */
         ssize_t n = recv(fd, buf + total, cap - 1 - total, MSG_DONTWAIT);
         if (n == 0) {
@@ -493,161 +495,6 @@ static ssize_t recv_response(int fd, char *buf, size_t cap, int budget_ms)
         return -1; /* budget expired, or the response outgrew the buffer */
     buf[total] = '\0';
     return (ssize_t) total;
-}
-
-/* Find the body — first occurrence of "\r\n\r\n".
- *
- * Returns NULL if no headers.
- */
-static const char *find_body(const char *response)
-{
-    const char *p = strstr(response, "\r\n\r\n");
-    return p ? p + 4 : NULL;
-}
-
-/* Parse HTTP/1.1 status code. Expects "HTTP/1.x NNN ..." at the start.
- * Returns -1 unless all three code characters are digits — without that check a
- * malformed status line yields an arbitrary int that slips through the 4xx/5xx
- * classification in http_lookup.
- */
-static int parse_status_code(const char *response)
-{
-    if (strncmp(response, "HTTP/1.", 7) != 0)
-        return -1;
-
-    /* strncmp only vouches for the first 7 bytes, so check the length before
-     * indexing: minor version at [7], separating space at [8], code at [9, 11].
-     */
-    if (strlen(response) < 12)
-        return -1;
-    if (!isdigit((unsigned char) response[7]) || response[8] != ' ')
-        return -1;
-    for (int i = 9; i <= 11; i++) {
-        if (!isdigit((unsigned char) response[i]))
-            return -1;
-    }
-    return (response[9] - '0') * 100 + (response[10] - '0') * 10 +
-           (response[11] - '0');
-}
-
-/* minimal JSON value extraction */
-
-/* Invariant: every json_* helper below requires "json" to be NUL-terminated.
- * The scanners walk forward on "*p", so an unterminated buffer would read past
- * the end. The only caller (geo_lookup) explicitly NUL-terminates the recv
- * buffer; do not introduce a call site that passes a non-terminated slice.
- */
-
-/* Find a top-level "<key>": and return a pointer to the start of the value
- * (whitespace skipped, value type undetermined). NULL if not found. Handles
- * flat ip-api.com JSON; doesn't dive into nested objects.
- */
-static const char *json_seek_value(const char *json, const char *key)
-{
-    char pat[64];
-    int n = snprintf(pat, sizeof(pat), "\"%s\"", key);
-    if (n <= 0 || (size_t) n >= sizeof(pat))
-        return NULL;
-
-    const char *p = strstr(json, pat);
-    if (!p)
-        return NULL;
-    p += (size_t) n;
-    while (*p && (*p == ' ' || *p == '\t' || *p == ':'))
-        p++;
-    return p;
-}
-
-/* Values arrive over plaintext HTTP (ip-api's free tier has no TLS) and are
- * bound for the terminal, so a control byte here would reach the tty verbatim
- * as an escape sequence. Fold C0 and DEL to a space at the trust boundary;
- * bytes >= 0x80 pass through so non-ASCII place names survive.
- */
-static char sanitize_display_byte(char c)
-{
-    unsigned char u = (unsigned char) c;
-    return (u < 0x20 || u == 0x7F) ? ' ' : c;
-}
-
-/* Extract a JSON string into out (NUL-terminated).
- *
- * Returns true on success. \uXXXX escapes are represented as spaces; ip-api
- * country/city values used by the UI are normally ASCII, and bounded copies
- * preserve buffer safety.
- */
-static bool json_get_string(const char *json,
-                            const char *key,
-                            char *out,
-                            size_t cap)
-{
-    const char *p = json_seek_value(json, key);
-    if (!p || *p != '"')
-        return false;
-    p++;
-    size_t i = 0;
-    while (*p && *p != '"') {
-        if (*p != '\\' || !p[1]) {
-            if (i + 1 < cap)
-                out[i++] = sanitize_display_byte(*p);
-            p++;
-            continue;
-        }
-        char escaped = p[1];
-        if (escaped == 'u') {
-            /* Skip \uXXXX as a single space. All four characters must be hex
-             * digits; a truncated "\u" near the end of a string (e.g. "\u12")
-             * would otherwise let p += 6 walk past the closing quote into the
-             * next JSON value.
-             */
-            for (int k = 2; k <= 5; k++) {
-                if (!isxdigit((unsigned char) p[k]))
-                    return false;
-            }
-            p += 6;
-            if (i + 1 < cap)
-                out[i++] = ' ';
-            continue;
-        }
-        char decoded;
-        switch (escaped) {
-        case 'n':
-            decoded = '\n';
-            break;
-        case 't':
-            decoded = '\t';
-            break;
-        default: /* ", \, /, and any other simple escape — copy verbatim */
-            decoded = escaped;
-            break;
-        }
-        if (i + 1 < cap)
-            out[i++] = sanitize_display_byte(decoded);
-        p += 2;
-    }
-    if (cap)
-        out[i < cap ? i : cap - 1] = '\0';
-    return *p == '"';
-}
-
-static bool json_get_double(const char *json, const char *key, double *out)
-{
-    const char *p = json_seek_value(json, key);
-    if (!p)
-        return false;
-    char *end = NULL;
-    double v = strtod(p, &end);
-    if (end == p || !isfinite(v))
-        return false;
-    *out = v;
-    return true;
-}
-
-static bool json_get_status_success(const char *json)
-{
-    char buf[16];
-    if (!json_get_string(json, "status", buf, sizeof(buf)))
-        return false;
-    return strcmp(buf, "success") == 0;
 }
 
 /* request/parse helpers */
@@ -673,46 +520,9 @@ static int send_get(int fd, const char *path)
     return 0;
 }
 
-/* Result of one HTTP attempt. Negative values are all "do not cache". */
-typedef enum {
-    GEO_HTTP_OK = 1,            /* authoritative result, out filled */
-    GEO_HTTP_MISS = 0,          /* authoritative miss, out is the sentinel */
-    GEO_HTTP_TRANSIENT = -1,    /* retry later */
-    GEO_HTTP_RATE_LIMITED = -2, /* 429: stop asking for a while */
-} geo_http_result;
-
-/* Authoritative-miss sentinel: zeroed result with valid=false. */
-static geo_http_result auth_miss(geo_result *out)
-{
-    memset(out, 0, sizeof(*out));
-    return GEO_HTTP_MISS;
-}
-
-/* Map an HTTP status to a cache decision, without touching a socket so the
- * policy is directly testable.
- *
- * GEO_HTTP_OK means "status is fine, keep parsing the body"; it is not yet a
- * result. Every other return is final.
+/* One HTTP attempt against ip-api. The verdict is a geo_http_result from
+ * geo-http.h, where the negative values all mean "do not cache".
  */
-static geo_http_result classify_status(int status, geo_result *out)
-{
-    if (status < 0)
-        return GEO_HTTP_TRANSIENT;
-
-    /* 429 earns a cooldown. 5xx is transient. 4xx is an authoritative miss: no
-     * retry of the same IP will satisfy a 400/404 from ip-api.
-     */
-    if (status == 429)
-        return GEO_HTTP_RATE_LIMITED;
-    if (status >= 500)
-        return GEO_HTTP_TRANSIENT;
-    if (status >= 400)
-        return auth_miss(out);
-    if (status != 200)
-        return GEO_HTTP_TRANSIENT;
-    return GEO_HTTP_OK;
-}
-
 static geo_http_result http_lookup(const char *path,
                                    geo_result *out,
                                    int timeout_ms,
@@ -736,35 +546,37 @@ static geo_http_result http_lookup(const char *path,
     if (n <= 0)
         return GEO_HTTP_TRANSIENT;
 
-    geo_http_result cls = classify_status(parse_status_code(buf), out);
+    geo_http_result cls =
+        geo_http_classify_status(geo_http_parse_status_code(buf), out);
     if (cls != GEO_HTTP_OK)
         return cls;
 
-    const char *body = find_body(buf);
+    const char *body = geo_http_find_body(buf);
     if (!body)
         return GEO_HTTP_TRANSIENT;
 
     /* status: "fail" — authoritative miss. */
-    if (!json_get_status_success(body))
-        return auth_miss(out);
+    if (!geo_json_get_status_success(body))
+        return geo_http_auth_miss(out);
 
     double lat, lon;
-    if (!json_get_double(body, "lat", &lat) ||
-        !json_get_double(body, "lon", &lon) || lat < -90.0 || lat > 90.0 ||
+    if (!geo_json_get_double(body, "lat", &lat) ||
+        !geo_json_get_double(body, "lon", &lon) || lat < -90.0 || lat > 90.0 ||
         lon < -180.0 || lon > 180.0)
-        return auth_miss(out);
+        return geo_http_auth_miss(out);
 
     memset(out, 0, sizeof(*out));
     out->valid = true;
     out->point.lat = lat;
     out->point.lon = lon;
 
-    if (!json_get_string(body, "query", out->ip, sizeof(out->ip)) &&
+    if (!geo_json_get_string(body, "query", out->ip, sizeof(out->ip)) &&
         fallback_ip_str)
         geotrace_copy_cstr(out->ip, sizeof(out->ip), fallback_ip_str);
-    if (!json_get_string(body, "country", out->country, sizeof(out->country)))
+    if (!geo_json_get_string(body, "country", out->country,
+                             sizeof(out->country)))
         geotrace_copy_cstr(out->country, sizeof(out->country), "Unknown");
-    json_get_string(body, "city", out->city, sizeof(out->city));
+    geo_json_get_string(body, "city", out->city, sizeof(out->city));
     return GEO_HTTP_OK;
 }
 
@@ -821,9 +633,9 @@ bool geo_lookup(struct geo_cache *c,
     if (rc < 0) {
         /* Not an answer about this IP, so nothing is cached. This has to come
          * before the cooldown decision: http_lookup returns transient without
-         * touching out when it never opened a socket, so falling through to
-         * the caching path below would store whatever the caller happened to
-         * pass in as though the service had confirmed it.
+         * touching out when it never opened a socket, so falling through to the
+         * caching path below would store whatever the caller happened to pass
+         * in as though the service had confirmed it.
          */
         memset(out, 0, sizeof(*out));
 

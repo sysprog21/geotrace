@@ -10,6 +10,13 @@
  * pair is compiled here gets exercised.
  */
 
+/* Two modules under test. The JSON and HTTP-status parsers now live in
+ * geo-http.c and are reached through its header (geo-http.o is linked); the
+ * recv_response socket-budget cases still need geo.c's statics, so that file is
+ * included directly as before.
+ */
+#include "geo-http.h"
+
 #include "geo.c"
 #include "platform.c"
 
@@ -24,9 +31,9 @@
 static void expect_json(const char *json, const char *key, const char *want)
 {
     char out[64];
-    bool ok = json_get_string(json, key, out, sizeof(out));
+    bool ok = geo_json_get_string(json, key, out, sizeof(out));
     if (!ok || strcmp(out, want) != 0) {
-        fprintf(stderr, "FAIL json_get_string(%s, %s): ok=%d got \"%s\"\n",
+        fprintf(stderr, "FAIL geo_json_get_string(%s, %s): ok=%d got \"%s\"\n",
                 json, key, (int) ok, ok ? out : "");
         exit(1);
     }
@@ -35,14 +42,14 @@ static void expect_json(const char *json, const char *key, const char *want)
 static void expect_json_fail(const char *json, const char *key)
 {
     char out[64];
-    if (json_get_string(json, key, out, sizeof(out))) {
-        fprintf(stderr, "FAIL json_get_string(%s, %s): expected failure\n",
+    if (geo_json_get_string(json, key, out, sizeof(out))) {
+        fprintf(stderr, "FAIL geo_json_get_string(%s, %s): expected failure\n",
                 json, key);
         exit(1);
     }
 }
 
-static void test_json_get_string(void)
+static void test_geo_json_get_string(void)
 {
     expect_json("{\"country\":\"Taiwan\"}", "country", "Taiwan");
     expect_json("{\"a\":1,\"city\":\"Taipei\",\"b\":2}", "city", "Taipei");
@@ -82,28 +89,30 @@ static void test_json_get_string(void)
 
     /* Truncation to cap, still NUL-terminated. */
     char small[4];
-    assert(json_get_string("{\"c\":\"abcdef\"}", "c", small, sizeof(small)));
+    assert(
+        geo_json_get_string("{\"c\":\"abcdef\"}", "c", small, sizeof(small)));
     assert(strcmp(small, "abc") == 0);
 
     /* cap == 0 reaches the copy loop and must not write through out at all. (A
      * non-string value would bail at the type check before getting here.)
      */
-    assert(json_get_string("{\"c\":\"abc\"}", "c", NULL, 0));
+    assert(geo_json_get_string("{\"c\":\"abc\"}", "c", NULL, 0));
 }
 
 /* parse_status_code */
 
 static void expect_status(const char *line, int want)
 {
-    int got = parse_status_code(line);
+    int got = geo_http_parse_status_code(line);
     if (got != want) {
-        fprintf(stderr, "FAIL parse_status_code(\"%s\") = %d, want %d\n", line,
+        fprintf(stderr,
+                "FAIL geo_http_parse_status_code(\"%s\") = %d, want %d\n", line,
                 got, want);
         exit(1);
     }
 }
 
-static void test_parse_status_code(void)
+static void test_geo_http_parse_status_code(void)
 {
     expect_status("HTTP/1.1 200 OK\r\n\r\n", 200);
     expect_status("HTTP/1.0 404 Not Found\r\n", 404);
@@ -133,10 +142,10 @@ static void expect_class(int status, geo_http_result want, bool want_sentinel)
     geo_result r;
     memset(&r, 0xAA, sizeof(r));
 
-    geo_http_result got = classify_status(status, &r);
+    geo_http_result got = geo_http_classify_status(status, &r);
     if (got != want) {
-        fprintf(stderr, "FAIL classify_status(%d) = %d, want %d\n", status,
-                (int) got, (int) want);
+        fprintf(stderr, "FAIL geo_http_classify_status(%d) = %d, want %d\n",
+                status, (int) got, (int) want);
         exit(1);
     }
     geo_result zeroed;
@@ -146,13 +155,14 @@ static void expect_class(int status, geo_http_result want, bool want_sentinel)
          * stale coordinates left behind by a partial reset would be cached as
          * an authoritative miss.
          */
-        fprintf(stderr, "FAIL classify_status(%d): result not zeroed\n",
+        fprintf(stderr,
+                "FAIL geo_http_classify_status(%d): result not zeroed\n",
                 status);
         exit(1);
     }
 }
 
-static void test_classify_status(void)
+static void test_geo_http_classify_status(void)
 {
     /* 200 means "keep parsing"; the body decides. */
     expect_class(200, GEO_HTTP_OK, false);
@@ -268,6 +278,7 @@ static void *trickle_writer(void *arg)
     int fd = *(int *) arg;
     char byte = 'x';
     assert(send(fd, &byte, 1, 0) == 1);
+
     /* Split the sleep: at 1000 ms the whole value lands on tv_nsec as 1e9,
      * which nanosleep rejects with EINVAL, and the writer would then close
      * immediately and hand the reader the EOF this test exists to withhold.
@@ -341,10 +352,10 @@ static void test_recv_response_complete(void)
     assert(pthread_join(tid, NULL) == 0);
 }
 
-/* A lookup that never reached the network must leave the cache alone. This
- * test lives here rather than in test-resolver.c because the count is private
- * to geo.c, and counting is the only way to see the difference: a wrongly
- * cached transient looks exactly like an authoritative miss from outside.
+/* A lookup that never reached the network must leave the cache alone. This test
+ * lives here rather than in test-resolver.c because the count is private to
+ * geo.c, and counting is the only way to see the difference: a wrongly cached
+ * transient looks exactly like an authoritative miss from outside.
  */
 static void test_cache_only_miss_is_not_cached(void)
 {
@@ -365,9 +376,9 @@ static void test_cache_only_miss_is_not_cached(void)
 
 int main(void)
 {
-    test_json_get_string();
-    test_parse_status_code();
-    test_classify_status();
+    test_geo_json_get_string();
+    test_geo_http_parse_status_code();
+    test_geo_http_classify_status();
     test_normalize_interfaces();
     test_row_parsers();
     test_recv_response_timeout();
