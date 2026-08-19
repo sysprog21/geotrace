@@ -52,23 +52,93 @@ int geo_http_parse_status_code(const char *response)
  * buffer; do not introduce a call site that passes a non-terminated slice.
  */
 
-/* Find a "<key>": and return the start of its value, whitespace skipped. NULL
- * if absent.
+/* Skip a JSON string starting at the opening quote; returns the byte after the
+ * closing quote, or NULL if the string never closes.
+ */
+static const char *json_skip_string(const char *p)
+{
+    if (*p != '"')
+        return NULL;
+    for (p++; *p; p++) {
+        if (*p == '\\') {
+            if (!p[1])
+                return NULL;
+            p++;
+            continue;
+        }
+        if (*p == '"')
+            return p + 1;
+    }
+    return NULL;
+}
+
+/* Find a TOP-LEVEL "<key>": and return the start of its value, whitespace
+ * skipped. NULL if absent.
+ *
+ * Walks the object rather than reaching for strstr. strstr matched the key
+ * anywhere, so a response of the shape
+ *
+ *     {"meta":{"lat":99.0},"lat":25.033}
+ *
+ * yielded 99.0: the nested field won because it came first. ip-api's own
+ * replies are flat, but they arrive over plaintext HTTP with no TLS on the free
+ * tier, so the bytes are whatever reaches the socket, and these values are the
+ * coordinates the map is drawn from. Depth tracking, and only accepting a
+ * string in key position, is what makes "top-level" true rather than assumed.
  */
 static const char *json_seek_value(const char *json, const char *key)
 {
-    char pat[64];
-    int n = snprintf(pat, sizeof(pat), "\"%s\"", key);
-    if (n <= 0 || (size_t) n >= sizeof(pat))
-        return NULL;
+    const char *p = json;
+    size_t key_len = strlen(key);
+    int depth = 0;
+    bool expect_key = false;
 
-    const char *p = strstr(json, pat);
-    if (!p)
-        return NULL;
-    p += (size_t) n;
-    while (*p && (*p == ' ' || *p == '\t' || *p == ':'))
+    while (*p) {
+        if (*p == '{' || *p == '[') {
+            depth++;
+            expect_key = (*p == '{' && depth == 1);
+            p++;
+            continue;
+        }
+        if (*p == '}' || *p == ']') {
+            depth--;
+            expect_key = false;
+            p++;
+            continue;
+        }
+        if (*p == ',') {
+            expect_key = (depth == 1);
+            p++;
+            continue;
+        }
+        if (*p == '"') {
+            const char *after = json_skip_string(p);
+            if (!after)
+                return NULL;
+
+            /* Only a string in key position at depth 1 can be our key; a value
+             * that happens to spell it must not match.
+             */
+            if (expect_key && depth == 1 &&
+                (size_t) (after - p) == key_len + 2 &&
+                strncmp(p + 1, key, key_len) == 0) {
+                const char *v = after;
+                while (*v == ' ' || *v == '\t')
+                    v++;
+                if (*v != ':')
+                    return NULL;
+                v++;
+                while (*v == ' ' || *v == '\t')
+                    v++;
+                return v;
+            }
+            expect_key = false;
+            p = after;
+            continue;
+        }
         p++;
-    return p;
+    }
+    return NULL;
 }
 
 /* Values arrive over plaintext HTTP (ip-api's free tier has no TLS) and are

@@ -374,6 +374,30 @@ static void test_cache_only_miss_is_not_cached(void)
     geo_cache_destroy(c);
 }
 
+/* The response reaches us over plaintext HTTP with no TLS on ip-api's free
+ * tier, so these bytes are whatever lands on the socket, and lat/lon are the
+ * coordinates the map draws.
+ */
+static void test_nested_key_does_not_shadow_top_level(void)
+{
+    double v = 0;
+
+    /* strstr matched the key anywhere, so the nested field won by being first
+     * and a lookup for "lat" returned 99.0 instead of 25.033.
+     */
+    assert(geo_json_get_double("{\"meta\":{\"lat\":99.0},\"lat\":25.033}",
+                               "lat", &v));
+    assert(v > 25.0 && v < 26.0);
+
+    v = 0;
+    assert(geo_json_get_double("{\"hits\":[{\"lat\":99.0}],\"lat\":25.033}",
+                               "lat", &v));
+    assert(v > 25.0 && v < 26.0);
+
+    /* A key present only inside a nested object is not a top-level field. */
+    assert(!geo_json_get_double("{\"meta\":{\"zz\":1.0}}", "zz", &v));
+}
+
 int main(void)
 {
     test_geo_json_get_string();
@@ -384,6 +408,7 @@ int main(void)
     test_recv_response_timeout();
     test_recv_response_complete();
     test_cache_only_miss_is_not_cached();
+    test_nested_key_does_not_shadow_top_level();
     fprintf(stderr, "parser tests passed\n");
     return 0;
 }
