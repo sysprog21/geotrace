@@ -150,14 +150,19 @@ static bool resolve_target_user(const cli_options *opts,
 
 /* Gate between cli_ensure_capture_privileges and starting the pipeline: we must
  * be root to capture, but must not still be root when the UI runs.
- * Returns false after printing the reason.
+ * Returns false after printing the reason. The policy, with the effective UID
+ * passed in rather than read from the process. Splitting it this way is what
+ * lets tests reach the root-only branch below: as a single function reading
+ * geteuid(), the refusal that matters most here is unreachable from an
+ * unprivileged test run, and a test that cannot reach it silently passes when
+ * the branch is deleted.
  */
-static bool capture_privileges_ok(const cli_options *opts)
+static bool capture_privileges_ok_for(const cli_options *opts, uid_t euid)
 {
     if (opts->demo)
         return true;
 
-    if (geteuid() != 0) {
+    if (euid != 0) {
         fprintf(stderr,
                 "geotrace: live capture needs root privileges. "
                 "Pass --demo for synthetic traffic.\n");
@@ -179,6 +184,11 @@ static bool capture_privileges_ok(const cli_options *opts)
         return false;
     }
     return true;
+}
+
+static bool capture_privileges_ok(const cli_options *opts)
+{
+    return capture_privileges_ok_for(opts, geteuid());
 }
 
 static void destroy_source(bool demo_mode, struct packet_source *source)

@@ -66,6 +66,25 @@ $(eval $(call add-test,bpf-filter,$(OUT)/ring.o $(OUT)/oom.o $(OUT)/packet-decod
                                  $(OUT)/geo-http.o))
 endif
 
+# First coverage for main.c and ui.c. Includes both as sources to reach their
+# statics (the privilege policy, the CSV buffer builder, the pure time and
+# animation helpers), so it must NOT also link main.o or ui.o.
+$(eval $(call add-test,runtime-policy,$(WORLD_MAP_DEPS) $(OUT)/cli.o \
+                                      $(OUT)/theme.o $(OUT)/platform.o \
+                                      $(OUT)/geo.o $(OUT)/geo-http.o \
+                                      $(OUT)/resolver.o $(OUT)/ring.o \
+                                      $(OUT)/demo-source.o $(OUT)/packet-decode.o))
+$(runtime-policy_TEST_TARGET): LDFLAGS += $(WORLD_MAP_LIBS)
+
+# main.c calls pcap_source_create/destroy when live capture is compiled in, so
+# the test needs the same object the binary links. Adding it as a prerequisite
+# is enough: test-framework links with $^, not a fixed list, and mk/config.mk
+# already puts $(PCAP_LIBS) in the global LDFLAGS -- repeating it here only
+# earns an "ignoring duplicate libraries: -lpcap" warning from the linker.
+ifeq ($(ENABLE_PCAP),1)
+$(runtime-policy_TEST_TARGET): $(OUT)/pcap-source.o
+endif
+
 tests: $(TEST_TARGETS)
 
 .PHONY: tests $(TEST_TARGETS)
