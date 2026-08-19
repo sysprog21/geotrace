@@ -25,9 +25,12 @@ const char *geo_http_find_body(const char *response)
  * classification in http_lookup.
  *
  * A leading '0' is rejected too, so the result is -1 or a real 100..999 code
- * and never something like 42. RFC 9110 has no status below 100. No behaviour
- * changes at the only call site: geo_http_classify_status maps both 42 and -1
- * to GEO_HTTP_TRANSIENT.
+ * and never something like 42. RFC 9110 has no status below 100, and the
+ * header's postcondition states that range; without this check "HTTP/1.1 042 x"
+ * returned 42 and made that postcondition false, which is the kind of unsound
+ * assumption a verified caller would then inherit. No behaviour changes at the
+ * only call site: geo_http_classify_status maps both 42 and -1 to
+ * GEO_HTTP_TRANSIENT.
  */
 int geo_http_parse_status_code(const char *response)
 {
@@ -153,6 +156,9 @@ static const char *json_seek_value(const char *json, const char *key)
  * as an escape sequence. Fold C0 and DEL to a space at the trust boundary;
  * bytes >= 0x80 pass through so non-ASCII place names survive.
  */
+/*@ assigns \nothing;
+    ensures \result == ' ' || \result == c;
+ */
 static char sanitize_display_byte(char c)
 {
     unsigned char u = (unsigned char) c;
@@ -176,6 +182,13 @@ bool geo_json_get_string(const char *json,
     p++;
     size_t i = 0;
 
+    /* i only advances under an "i + 1 < cap" guard, so it never reaches cap;
+     * that is what keeps every out[i] write inside the caller's buffer.
+     */
+    /*@ loop invariant bounded: i == 0 || i < cap;
+        loop invariant readable: \valid_read(p);
+        loop assigns i, p, out[0 .. cap - 1];
+     */
     while (*p && *p != '"') {
         if (*p != '\\' || !p[1]) {
             if (i + 1 < cap)

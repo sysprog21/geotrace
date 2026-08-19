@@ -30,8 +30,22 @@
  *
  * "created_at" is left zeroed: the caller stamps it. This keeps the decoder a
  * pure function of its arguments, which is worth more than the one saved line.
- * Null "bytes", "out" and "ifname" are all admitted, matching what the body
- * actually checks.
+ * It also fixes an unsound frame -- clock_gettime's own contract assigns a libc
+ * clock global (__fc_time) as well as its output, so "assigns *out" here was
+ * narrower than what the function really wrote. Null "bytes", "out" and
+ * "ifname" are all admitted, matching what the body actually checks. An earlier
+ * revision required a valid "out" instead, on the theory that it would buy
+ * proof strength; measurement said otherwise (same goals proved either way) and
+ * it put tests/test-packet-decode.c's null-out case in violation of the
+ * contract it was meant to be testing, which EVA then flagged. A contract that
+ * forbids what the code deliberately handles is just a second, disagreeing
+ * specification.
+ */
+/*@ requires bytes == \null || \valid_read(bytes + (0 .. caplen - 1));
+    requires out == \null || \valid(out);
+    requires ifname == \null || valid_read_string(ifname);
+    requires \separated(out, bytes + (0 .. caplen - 1));
+    assigns *out;
  */
 bool packet_decode_ipv4(const unsigned char *bytes,
                         size_t caplen,

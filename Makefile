@@ -113,8 +113,8 @@ check: all tests
 	}
 	$(Q)$(call notice, [OK])
 
-# Deductive verification (Frama-C/WP) of the ACSL in include/geotrace/util.h
-# and src/ring.c. Optional: Frama-C is not a build dependency, so this is not
+# Deductive verification (Frama-C/WP) of the ACSL in include/geotrace/util.h,
+# src/ring.c, src/packet-decode.c and src/geo-http.c. Optional: Frama-C is not a build dependency, so this is not
 # wired into `check`. Each file's header comment records what is proved, what is
 # assumed, and what is still open.
 FRAMA_C ?= frama-c
@@ -122,20 +122,37 @@ FRAMA_C ?= frama-c
 # One process over all of VERIFY_SRCS: every invocation reparses the whole libc
 # first, so a second process is a second parse for nothing.
 #
+# Scope decisions, each already paid for once:
+#   world-map.c, ui.c  Not targets, by request. Projection maths and rendering,
+#                      where a defect is a wrong pixel, and between them the
+#                      largest source of unproved obligations in the tree.
+#   geo.c              Half-analyzable. Needs -DGEOTRACE_VERSION=\"...\" or the
+#                      preprocessor stops on the User-Agent concatenation and
+#                      reports it as a parse error in geo.c. WP then aborts in
+#                      Frama-C's own libc ("sys/socket.h: Invalid infinite
+#                      range") for anything pulling in the socket specs.
+#   geo-http.c         Carries ACSL for its whole interface, but only the two
+#                      functions listed below discharge completely; the
+#                      extractors prove 66/86 and 15/24 and still need loop and
+#                      frame work. Listing them would import known-red goals
+#                      into a gate whose value is that green means something.
+#
 # util.h is all static inline, so it needs a host TU to land in the AST, and
 # packet-decode.c is the smallest one that includes it. Exactly one such TU
 # belongs here: a second duplicates every inline goal (they reappear with a
 # "_0" suffix, failures included), and adding resolver.c cost 100 goals and a
 # third of the cold run for no extra coverage, since the inlines are analyzed
 # whether or not a listed TU calls them.
-VERIFY_SRCS := src/ring.c src/packet-decode.c
+VERIFY_SRCS := src/ring.c src/packet-decode.c src/geo-http.c
 
 VERIFY_FCTS := slot_at,take_locked,ring_put_latest,ring_take,ring_try_take \
                ring_shutdown,ring_size,ring_create \
                geotrace_elapsed_ns,geotrace_abs_int,geotrace_min_int \
                geotrace_max_int,geotrace_clamp_int,geotrace_clamp_double \
                geotrace_clamp01,geotrace_max_float \
-               geotrace_copy_cstr,geotrace_copy_span
+               geotrace_copy_cstr,geotrace_copy_span \
+               packet_decode_ipv4 \
+               geo_http_classify_status,sanitize_display_byte
 comma := ,
 empty :=
 space := $(empty) $(empty)
