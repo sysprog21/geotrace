@@ -128,14 +128,12 @@ install: $(BIN)
 	$(Q)install -m 0755 $(BIN) $(DESTDIR)$(PREFIX)/bin/geotrace
 	$(Q)$(call notice, installed -> $(DESTDIR)$(PREFIX)/bin/geotrace)
 
-# Must match the version .ci/check-format.sh enforces: clang-format 22
-# reformats the _Static_assert chain in src/world-map.c, so a bare
-# `clang-format` would rewrite the tree into something CI rejects. Override
-# with CLANG_FORMAT=/path/to/clang-format when the binary is not on PATH
-# under that name (e.g. Homebrew's llvm@20).
+# Must match .ci/check-format.sh: clang-format 22 reformats the _Static_assert
+# chain in src/world-map.c differently, so a bare `clang-format` writes a tree
+# CI rejects. Override when the binary is not on PATH under this name.
 CLANG_FORMAT ?= clang-format-20
 
-format:
+indent:
 	$(Q)find src include tests -type f \( -name '*.c' -o -name '*.h' \) 2>/dev/null \
 	    | xargs -r $(CLANG_FORMAT) -i
 
@@ -150,7 +148,7 @@ $(OUT)/%.o: $(OUT)/%.c | $(OUT)
 	$(VECHO) "  CC\t$@\n"
 	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF $@.d $<
 
-.PHONY: all debug sanitize run tests check clean distclean install format
+.PHONY: all debug sanitize run tests check clean distclean install indent
 
 # Auto-deps
 -include $(deps)

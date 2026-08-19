@@ -29,7 +29,7 @@ warn      = $(PRINTF) "$(YELLOW)$(strip $1)$(NC)\n"
 error_msg = $(PRINTF) "$(RED)$(strip $1)$(NC)\n"
 
 # Skip expensive dependency detection on clean targets
-SKIP_DEPS_TARGETS := clean distclean format
+SKIP_DEPS_TARGETS := clean distclean indent
 SKIP_DEPS_CHECK := $(filter $(SKIP_DEPS_TARGETS),$(MAKECMDGOALS))
 
 # Build directory

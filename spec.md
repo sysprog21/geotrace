@@ -45,7 +45,7 @@ make debug          # ASan + UBSan
 make sanitize       # ASan + UBSan build, then TSan tests
 make tests          # unit tests
 make check          # tests + 3-second --demo smoke run
-make format         # clang-format -i over src/ include/ tests/
+make indent         # clang-format -i over src/ include/ tests/
 ```
 
 ## Naming conventions
@@ -74,7 +74,7 @@ uint32_t ip_host;   /* host-order via ntohl, used for cache keys and gates */
 ## Formatting
 
 Formatting is enforced by `.clang-format` (Chromium base, customized). Run
-`make format` rather than hand-aligning. The shape:
+`make indent` rather than hand-aligning. The shape:
 
 - 4-space indent, no tabs (`UseTab: Never`, `IndentWidth: 4`).
 - Linux-style braces: function opening braces on a new line; control-structure
