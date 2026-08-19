@@ -343,6 +343,9 @@ Module ownership in `src/`:
   internal to `src/`, not public API.
 - `demo-source.c` / `pcap-source.c` — push-API packet sources behind
   `struct packet_source`.
+- `packet-decode.c` — IPv4 header decode and its bounds checks. Separate
+  from `pcap-source.c` so it can be tested without libpcap: that file is
+  wrapped in `#if HAVE_PCAP` and its handler takes a `pcap_pkthdr`.
 - `world-map.c` — projection, braille glyph composition, static-layer
   cache, trajectories.
 - `ui.c` — `termios` raw mode, double-buffered ANSI render, status

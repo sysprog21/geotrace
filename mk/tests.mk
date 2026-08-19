@@ -50,6 +50,11 @@ $(eval $(call add-test,parsers,$(OUT)/geo-http.o $(OUT)/cli.o $(OUT)/theme.o $(O
 # platform_iface_append, which cli.c calls.
 $(eval $(call add-test,cli,$(OUT)/theme.o $(OUT)/platform.o $(OUT)/oom.o))
 
+# IPv4 frame decode from the capture path. Links packet-decode.o rather than
+# including pcap-source.c: that file is wrapped in "#if HAVE_PCAP", so this test
+# runs on a box with no libpcap, which is the point of splitting the decode out.
+$(eval $(call add-test,packet-decode,$(OUT)/packet-decode.o $(OUT)/oom.o))
+
 # Resolver pipeline stage: cache-only lookups, so no network in the test.
 $(eval $(call add-test,resolver,$(OUT)/resolver.o $(OUT)/geo.o $(OUT)/geo-http.o \
                                 $(OUT)/ring.o $(OUT)/oom.o))
@@ -57,7 +62,8 @@ $(eval $(call add-test,resolver,$(OUT)/resolver.o $(OUT)/geo.o $(OUT)/geo-http.o
 # BPF program vs IPV4_BLOCKED_RANGES agreement. Needs libpcap to compile the
 # filter, so it only exists when live capture is enabled.
 ifeq ($(ENABLE_PCAP),1)
-$(eval $(call add-test,bpf-filter,$(OUT)/ring.o $(OUT)/oom.o $(OUT)/geo-http.o))
+$(eval $(call add-test,bpf-filter,$(OUT)/ring.o $(OUT)/oom.o $(OUT)/packet-decode.o \
+                                 $(OUT)/geo-http.o))
 endif
 
 tests: $(TEST_TARGETS)
