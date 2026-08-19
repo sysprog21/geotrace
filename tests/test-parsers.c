@@ -398,6 +398,23 @@ static void test_nested_key_does_not_shadow_top_level(void)
     assert(!geo_json_get_double("{\"meta\":{\"zz\":1.0}}", "zz", &v));
 }
 
+static void test_number_must_end_at_a_delimiter(void)
+{
+    double v = 0;
+
+    /* strtod stops at the first unusable byte, so "25abc" read as 25 and a
+     * malformed coordinate became authoritative instead of a miss.
+     */
+    assert(!geo_json_get_double("{\"lat\":25abc}", "lat", &v));
+    assert(!geo_json_get_double("{\"lat\":1.2.3}", "lat", &v));
+
+    /* Legal terminators still parse. */
+    assert(geo_json_get_double("{\"lat\":25.5,\"lon\":1}", "lat", &v));
+    assert(v > 25.4 && v < 25.6);
+    assert(geo_json_get_double("{\"lat\":25.5}", "lat", &v));
+    assert(geo_json_get_double("{\"lat\":25.5 }", "lat", &v));
+}
+
 int main(void)
 {
     test_geo_json_get_string();
@@ -409,6 +426,7 @@ int main(void)
     test_recv_response_complete();
     test_cache_only_miss_is_not_cached();
     test_nested_key_does_not_shadow_top_level();
+    test_number_must_end_at_a_delimiter();
     fprintf(stderr, "parser tests passed\n");
     return 0;
 }

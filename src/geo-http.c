@@ -222,6 +222,14 @@ bool geo_json_get_double(const char *json, const char *key, double *out)
     double v = strtod(p, &end);
     if (end == p || !isfinite(v))
         return false;
+
+    /* strtod stops at the first byte it cannot use, so "25abc" would otherwise
+     * be accepted as 25 and a malformed coordinate would read as authoritative.
+     * The number has to end where a JSON value legally ends.
+     */
+    if (*end != '\0' && *end != ',' && *end != '}' && *end != ']' &&
+        *end != ' ' && *end != '\t' && *end != '\n' && *end != '\r')
+        return false;
     *out = v;
     return true;
 }
